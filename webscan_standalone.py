@@ -25,6 +25,10 @@ from datetime import datetime
 from typing import List, Dict, Any, Tuple, Optional, Union
 import random
 import string
+import threading
+import signal
+import ipaddress
+from pathlib import Path
 
 # Third-party imports
 import requests
@@ -42,8 +46,39 @@ except ImportError:
 init(autoreset=True)
 
 # Global variables
-USER_AGENT = "WebScan/1.0.0"
+VERSION = "1.1.0"
+USER_AGENT = f"WebScan/{VERSION}"
+SCAN_INTERRUPTED = False
+
+# Args class for scan configuration
+class ScanArgs:
+    """Class to hold scan configuration parameters"""
+    def __init__(self):
+        # Required parameters with defaults
+        self.url = ''                      # Target URL to scan
+        self.scan_types = []               # List of scan types
+        self.timeout = 10                  # Request timeout
+        self.threads = 5                   # Number of threads
+        self.depth = 2                     # Scan depth
+        self.crawl = False                 # Crawl the site
+        self.verbose = False               # Verbose output
+        self.output = 'webscan_report.txt' # Output file
+        
+        # Optional parameters
+        self.user_agent = USER_AGENT       # User-Agent string
+        self.custom_headers = {'User-Agent': USER_AGENT}  # Custom headers
+        self.show_progress = False         # Show progress
+        self.save_state = False            # Save state for resume
+        self.risk_threshold = 1.0          # Risk threshold
+        self.aggressive = False            # Aggressive mode
+        self.quiet = False                 # Quiet mode
+        self.json = False                  # JSON output
+        self.target_list = ''              # Target list file
+        self.resume = ''                   # Resume file
 DEFAULT_TIMEOUT = 10
+SCAN_RESUME_DATA = {}
+PROGRESS_LOCK = threading.Lock()
+SCAN_INTERRUPTED = False
 
 ###########################################
 # UTILITY FUNCTIONS
@@ -130,6 +165,255 @@ def is_url_accessible(url, timeout=10, user_agent=USER_AGENT):
     except Exception:
         return False
 
+# Progress indicator class for long-running scans
+class ProgressIndicator:
+    """Class for showing progress of long-running scans."""
+    
+    def __init__(self, total_items=100, prefix='Progress:', suffix='Complete', decimals=1, length=50, fill='█', print_end="\r"):
+        """
+        Initialize the progress indicator.
+        
+        Args:
+            total_items (int): Total number of items to process
+            prefix (str): Prefix string
+            suffix (str): Suffix string
+            decimals (int): Decimal places for percentage
+            length (int): Bar length
+            fill (str): Bar fill character
+            print_end (str): End character (e.g. "\r", "\n")
+        """
+        self.total_items = total_items
+        self.prefix = prefix
+        self.suffix = suffix
+        self.decimals = decimals
+        self.length = length
+        self.fill = fill
+        self.print_end = print_end
+        self.completed = 0
+        self.active = True
+        self.start_time = time.time()
+        self.lock = threading.Lock()
+    
+    def update(self, completed=1):
+        """
+        Update progress indicator by incrementing completed items.
+        
+        Args:
+            completed (int): Number of items completed
+        """
+        with self.lock:
+            if not self.active:
+                return
+            
+            self.completed += completed
+            percent = (self.completed / self.total_items) * 100
+            filled_length = int(self.length * self.completed // self.total_items)
+            bar = self.fill * filled_length + '-' * (self.length - filled_length)
+            
+            elapsed_time = time.time() - self.start_time
+            time_per_item = elapsed_time / self.completed if self.completed > 0 else 0
+            eta = time_per_item * (self.total_items - self.completed) if self.completed > 0 else 0
+            
+            eta_min = int(eta // 60)
+            eta_sec = int(eta % 60)
+            
+            # Format the progress bar
+            print(f'\r{self.prefix} |{bar}| {percent:.{self.decimals}f}% {self.suffix} (ETA: {eta_min:02d}:{eta_sec:02d})', end=self.print_end)
+            sys.stdout.flush()
+            
+            # Print new line when complete
+            if self.completed >= self.total_items:
+                print()
+                self.active = False
+    
+    def finish(self):
+        """Mark the progress as complete."""
+        with self.lock:
+            self.completed = self.total_items
+            self.update(0)
+            self.active = False
+
+
+# Save and load scan state for resume functionality
+def save_scan_state(state_file, data):
+    """
+    Save scan state to a file for resuming later.
+    
+    Args:
+        state_file (str): File path to save state
+        data (dict): Scan state data
+    """
+    try:
+        with open(state_file, 'w') as f:
+            json.dump(data, f, indent=2)
+        return True
+    except Exception as e:
+        print(f"{Fore.RED}[ERROR] Failed to save scan state: {str(e)}")
+        return False
+
+
+def load_scan_state(state_file):
+    """
+    Load scan state from a file for resuming.
+    
+    Args:
+        state_file (str): File path to load state from
+        
+    Returns:
+        dict: Loaded scan state data or empty dict if file doesn't exist
+    """
+    if not os.path.exists(state_file):
+        return {}
+    
+    try:
+        with open(state_file, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"{Fore.RED}[ERROR] Failed to load scan state: {str(e)}")
+        return {}
+
+
+def signal_handler(sig, frame):
+    """Handle keyboard interrupt gracefully."""
+    global SCAN_INTERRUPTED
+    print(f"\n{Fore.YELLOW}[WARNING] Scan interrupted by user. Saving progress...")
+    SCAN_INTERRUPTED = True
+    # Let the main function handle the cleanup
+    return
+
+
+def calculate_risk_score(vulnerability):
+    """
+    Calculate a numeric risk score based on vulnerability severity and other factors.
+    
+    Args:
+        vulnerability (dict): Vulnerability data
+        
+    Returns:
+        float: Risk score from 0-10
+    """
+    # Base score by severity
+    severity_scores = {
+        'Critical': 9.0, 
+        'High': 7.0, 
+        'Medium': 5.0, 
+        'Low': 3.0, 
+        'Info': 1.0
+    }
+    
+    base_score = severity_scores.get(vulnerability.get('severity', 'Info'), 1.0)
+    
+    # Adjust score based on additional factors
+    adjustment = 0.0
+    
+    # Type-specific adjustments
+    vuln_type = vulnerability.get('type', '')
+    
+    if 'SQL Injection' in vuln_type:
+        adjustment += 1.0  # SQL injection is high risk for data exposure
+    elif 'Cross-Site Scripting' in vuln_type:
+        adjustment += 0.8  # XSS can lead to client-side attacks
+    elif 'Open Port' in vuln_type:
+        # Higher risk for certain critical ports
+        port = vulnerability.get('port', 0)
+        if port in [21, 22, 23, 3389]:  # FTP, SSH, Telnet, RDP
+            adjustment += 0.9
+        else:
+            adjustment += 0.4
+    elif 'Directory Traversal' in vuln_type:
+        adjustment += 0.9  # Can expose sensitive files
+    elif 'Sensitive File' in vuln_type:
+        adjustment += 0.7  # Direct exposure of sensitive data
+    elif 'Missing Security Header' in vuln_type:
+        # Different headers have different impact
+        header = vulnerability.get('header', '')
+        if header in ['Strict-Transport-Security', 'Content-Security-Policy']:
+            adjustment += 0.6
+        else:
+            adjustment += 0.3
+    elif 'SSL/TLS' in vuln_type or 'Weak Cipher' in vuln_type:
+        adjustment += 0.7  # Encryption weaknesses are serious
+    
+    # Cap the final score at 10
+    final_score = min(10.0, base_score + adjustment)
+    
+    return round(final_score, 1)
+
+
+def expand_targets(targets, target_list_file=None):
+    """
+    Expand targets from single URL, list of URLs, IP range, or file.
+    
+    Args:
+        targets (str): Target specification - URL, IP, IP range, or file path
+        target_list_file (str): Optional file containing target URLs/IPs
+        
+    Returns:
+        list: Expanded list of target URLs
+    """
+    expanded_targets = []
+    
+    # Read from file if specified
+    if target_list_file:
+        try:
+            with open(target_list_file, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        expanded_targets.append(line)
+            print(f"{Fore.CYAN}[INFO] Loaded {len(expanded_targets)} targets from {target_list_file}")
+        except Exception as e:
+            print(f"{Fore.RED}[ERROR] Failed to read target list file: {str(e)}")
+    
+    # Process direct target specification
+    if targets:
+        # Check if it's an IP range (CIDR notation)
+        try:
+            if '/' in targets and not targets.startswith(('http://', 'https://')):
+                network = ipaddress.ip_network(targets, strict=False)
+                for ip in network.hosts():
+                    expanded_targets.append(f"http://{str(ip)}")
+                print(f"{Fore.CYAN}[INFO] Expanded IP range to {len(expanded_targets)} targets")
+            else:
+                # Add single target
+                expanded_targets.append(targets)
+        except ValueError:
+            # Not a valid CIDR, treat as single target
+            expanded_targets.append(targets)
+    
+    # Validate and normalize URLs
+    valid_targets = []
+    for target in expanded_targets:
+        # Add http:// if no scheme specified
+        if not target.startswith(('http://', 'https://')):
+            target = f"http://{target}"
+        
+        # Parse URL to validate
+        try:
+            parsed = urlparse(target)
+            if parsed.netloc:
+                valid_targets.append(target)
+            else:
+                print(f"{Fore.YELLOW}[WARNING] Invalid target URL skipped: {target}")
+        except Exception:
+            print(f"{Fore.YELLOW}[WARNING] Invalid target URL skipped: {target}")
+    
+    return valid_targets
+
+
+def print_interactive_menu():
+    """Display interactive mode menu."""
+    print(f"\n{Fore.CYAN}====== WebScan Interactive Mode ======{Style.RESET_ALL}")
+    print(f"1. {Fore.GREEN}Quick Scan{Style.RESET_ALL} (headers, info disclosure)")
+    print(f"2. {Fore.YELLOW}Standard Scan{Style.RESET_ALL} (SQL injection, XSS, headers, info)")
+    print(f"3. {Fore.RED}Full Scan{Style.RESET_ALL} (all checks)")
+    print(f"4. {Fore.BLUE}Custom Scan{Style.RESET_ALL} (select checks)")
+    print(f"5. {Fore.MAGENTA}Target Discovery{Style.RESET_ALL} (port scan, harvesting)")
+    print(f"6. {Fore.CYAN}Resume Previous Scan{Style.RESET_ALL}")
+    print(f"0. {Fore.WHITE}Exit{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}======================================{Style.RESET_ALL}")
+
+
 class Reporter:
     """Class to generate vulnerability scan reports."""
     
@@ -146,6 +430,13 @@ class Reporter:
         self.scan_types = []
         # Initialize start_time with current datetime to avoid None references
         self.start_time = datetime.now()
+        self.scan_id = self._generate_scan_id()
+    
+    def _generate_scan_id(self):
+        """Generate a unique scan ID."""
+        timestamp = int(time.time())
+        random_str = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
+        return f"scan_{timestamp}_{random_str}"
     
     def start_report(self, target_url, scan_types):
         """
@@ -3393,24 +3684,25 @@ class SSLTLSScanner:
         # Map of vulnerable SSL/TLS protocol versions
         # Modern Python versions have removed SSLv2 and SSLv3 protocol constants
         # Using a dictionary with protocol names as keys instead of protocol constants
+        # Use modern approach to handle deprecated protocol constants
         self.vulnerable_protocols = {
             'SSLv3': {
                 'name': 'SSLv3',
-                'protocol': getattr(ssl, 'PROTOCOL_SSLv3', None),
+                'protocol': 'SSLv3',
                 'severity': 'Critical',
                 'description': 'SSLv3 is vulnerable to POODLE attack',
                 'recommendation': 'Disable SSLv3 on the server'
             },
             'TLSv1.0': {
                 'name': 'TLSv1.0',
-                'protocol': getattr(ssl, 'PROTOCOL_TLSv1', None),
+                'protocol': 'TLSv1.0',
                 'severity': 'High',
                 'description': 'TLSv1.0 is outdated and potentially insecure',
                 'recommendation': 'Disable TLSv1.0 on the server'
             },
             'TLSv1.1': {
                 'name': 'TLSv1.1',
-                'protocol': getattr(ssl, 'PROTOCOL_TLSv1_1', None),
+                'protocol': 'TLSv1.1',
                 'severity': 'Medium',
                 'description': 'TLSv1.1 is outdated and should be upgraded',
                 'recommendation': 'Upgrade to TLSv1.2 or TLSv1.3'
@@ -3617,19 +3909,20 @@ class SSLTLSScanner:
         
         # Check each vulnerable protocol
         for protocol_name, info in self.vulnerable_protocols.items():
-            # Skip if protocol constant is not available in this Python version
-            if info['protocol'] is None:
-                if self.verbose and self.logger:
-                    self.logger.info(f"Protocol {info['name']} check skipped (not supported by this Python version)")
-                continue
-                
             try:
-                if info['protocol'] is None:
-                    continue
                     
-                context = ssl.SSLContext(info['protocol'])
+                # Create context with modern approach (no deprecated constants)
+                context = ssl.create_default_context()
+                # Disable all security measures to test protocols
                 context.check_hostname = False
                 context.verify_mode = ssl.CERT_NONE
+                # Set the protocol options to match the desired protocol
+                if info['name'] == 'SSLv3':
+                    context.options &= ~ssl.OP_NO_SSLv3
+                elif info['name'] == 'TLSv1.0':
+                    context.options &= ~ssl.OP_NO_TLSv1
+                elif info['name'] == 'TLSv1.1':
+                    context.options &= ~ssl.OP_NO_TLSv1_1
                 
                 with socket.create_connection((self.hostname, self.port), self.timeout) as sock:
                     with context.wrap_socket(sock, server_hostname=self.hostname) as ssl_sock:
@@ -4146,9 +4439,15 @@ def print_banner():
 ║  {Fore.WHITE} ╚══╝╚══╝ ╚══════╝╚═════╝ ╚══════╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═══╝{Fore.CYAN}  ║
 ║                                                                  ║
 ║  {Fore.GREEN}Advanced Website Vulnerability Scanner                        {Fore.CYAN}║
-║  {Fore.YELLOW}Version 1.0.0                                                 {Fore.CYAN}║
+║  {Fore.YELLOW}Version {VERSION}                                                {Fore.CYAN}║
 ║  {Fore.MAGENTA}Developed by AMKUSH                                           {Fore.CYAN}║
 ╚══════════════════════════════════════════════════════════════════╝
+
+{Style.RESET_ALL}{Fore.CYAN}➤ {Fore.YELLOW}Real-world vulnerability detection with aggressive techniques
+{Fore.CYAN}➤ {Fore.GREEN}Multi-threaded scanning engine for efficient analysis
+{Fore.CYAN}➤ {Fore.BLUE}Comprehensive reporting with risk-based prioritization
+{Fore.CYAN}➤ {Fore.MAGENTA}Target scanning via URL, IP, or CIDR range
+{Fore.CYAN}➤ {Fore.RED}Multiple vulnerability detection modules{Style.RESET_ALL}
     """
     print(banner)
 
@@ -4159,33 +4458,55 @@ def parse_arguments():
         formatter_class=argparse.RawTextHelpFormatter
     )
     
-    parser.add_argument('url', help='Target URL to scan (e.g., https://example.com)')
+    # Target specification - can be URL, IP, CIDR range, or left empty for interactive mode
+    parser.add_argument('url', nargs='?', 
+                        help='Target URL to scan (e.g., https://example.com) or IP/CIDR range')
     
-    parser.add_argument('-o', '--output', 
+    # Input/Output options
+    output_group = parser.add_argument_group('Output Options')
+    output_group.add_argument('-o', '--output', 
                         help='Output file for the scan report (default: webscan_report.txt)',
                         default='webscan_report.txt')
     
-    parser.add_argument('-t', '--threads', 
+    output_group.add_argument('--json', 
+                        help='Export results in JSON format',
+                        action='store_true')
+    
+    output_group.add_argument('--log-file', 
+                        help='Log file path (default: webscan.log)',
+                        default='webscan.log')
+    
+    output_group.add_argument('--no-color', 
+                        help='Disable colored output',
+                        action='store_true')
+    
+    output_group.add_argument('-q', '--quiet', 
+                        help='Quiet mode - display only critical information',
+                        action='store_true')
+    
+    # Scan configuration options
+    scan_group = parser.add_argument_group('Scan Configuration')
+    scan_group.add_argument('-t', '--threads', 
                         help='Number of threads to use (default: 5)',
                         type=int, default=5)
     
-    parser.add_argument('-d', '--depth', 
+    scan_group.add_argument('-d', '--depth', 
                         help='Scan depth - number of levels to crawl (default: 2)',
                         type=int, default=2)
     
-    parser.add_argument('-c', '--crawl', 
+    scan_group.add_argument('-c', '--crawl', 
                         help='Crawl the website for links before scanning',
                         action='store_true')
     
-    parser.add_argument('--timeout', 
+    scan_group.add_argument('--timeout', 
                         help='Request timeout in seconds (default: 10)',
                         type=int, default=10)
     
-    parser.add_argument('-v', '--verbose', 
-                        help='Enable verbose output',
-                        action='store_true')
+    scan_group.add_argument('--user-agent', 
+                        help='Custom User-Agent string',
+                        default=f'WebScan/{VERSION}')
     
-    parser.add_argument('--scan-type', 
+    scan_group.add_argument('--scan-type', 
                         help='''Specify scan types (comma-separated):
 all: All scan types (default)
 sqli: SQL Injection
@@ -4198,34 +4519,109 @@ ssl: SSL/TLS
 info: Information Disclosure''',
                         default='all')
     
-    parser.add_argument('--user-agent', 
-                        help='Custom User-Agent string',
-                        default='WebScan/1.0.0')
+    scan_group.add_argument('--exclude', 
+                        help='Exclude specific scan types (comma-separated)', 
+                        default='')
     
-    parser.add_argument('--log-file', 
-                        help='Log file path (default: webscan.log)',
-                        default='webscan.log')
+    scan_group.add_argument('--max-urls', 
+                        help='Maximum number of URLs to scan (default: 1000)',
+                        type=int, default=1000)
     
-    parser.add_argument('--no-color', 
-                        help='Disable colored output',
+    # Advanced options
+    advanced_group = parser.add_argument_group('Advanced Options')
+    advanced_group.add_argument('-i', '--interactive', 
+                        help='Run in interactive mode',
                         action='store_true')
     
+    advanced_group.add_argument('--target-list', 
+                        help='File containing list of targets to scan (one per line)')
+    
+    advanced_group.add_argument('--cookies', 
+                        help='Cookies to include with HTTP requests (format: "name1=value1; name2=value2")')
+    
+    advanced_group.add_argument('--headers', 
+                        help='Custom HTTP headers to add to requests (format: "Header1: value1; Header2: value2")')
+    
+    advanced_group.add_argument('--resume', 
+                        help='Resume from a previous scan state file')
+    
+    advanced_group.add_argument('--risk-threshold', 
+                        help='Risk score threshold for reporting vulnerabilities (1-10, default: 1)',
+                        type=float, default=1.0)
+    
+    # Feature flags
+    feature_group = parser.add_argument_group('Feature Options')
+    feature_group.add_argument('-v', '--verbose', 
+                        help='Enable verbose output',
+                        action='store_true')
+    
+    feature_group.add_argument('--show-progress', 
+                        help='Show progress bar during scanning',
+                        action='store_true')
+    
+    feature_group.add_argument('--save-state', 
+                        help='Save scan state periodically for resume capability',
+                        action='store_true')
+    
+    feature_group.add_argument('--aggressive', 
+                        help='Enable more aggressive scanning techniques (potentially detectable)',
+                        action='store_true')
+    
+    # Parse arguments
     args = parser.parse_args()
     
-    # Validate URL
-    parsed_url = urlparse(args.url)
-    if not parsed_url.scheme or not parsed_url.netloc:
-        parser.error(f"Invalid URL format: {args.url}")
+    # Adjust file names if JSON output is requested
+    if args.json and not args.output.lower().endswith('.json'):
+        args.output = os.path.splitext(args.output)[0] + '.json'
+    
+    # Interactive mode doesn't require a URL
+    if not args.url and not args.interactive and not args.target_list and not args.resume:
+        parser.error("URL is required unless --interactive, --target-list, or --resume is specified")
+    
+    # Validate URL if provided
+    if args.url and not args.url.startswith(('http://', 'https://')) and '/' not in args.url:
+        # Not CIDR notation and not a URL with scheme, might be a simple hostname
+        try:
+            ipaddress.ip_address(args.url)  # Check if it's a valid IP
+        except ValueError:
+            # Not an IP, assume it's a hostname without scheme
+            args.url = f"http://{args.url}"
     
     # Process scan types
+    valid_types = ['sqli', 'xss', 'port', 'dir', 'files', 'headers', 'ssl', 'info']
+    
     if args.scan_type == 'all':
-        args.scan_types = ['sqli', 'xss', 'port', 'dir', 'files', 'headers', 'ssl', 'info']
+        args.scan_types = valid_types.copy()
     else:
         args.scan_types = [s.strip() for s in args.scan_type.split(',')]
-        valid_types = ['sqli', 'xss', 'port', 'dir', 'files', 'headers', 'ssl', 'info']
         for scan_type in args.scan_types:
             if scan_type not in valid_types:
                 parser.error(f"Invalid scan type: {scan_type}")
+    
+    # Process excluded scan types
+    if args.exclude:
+        excluded_types = [s.strip() for s in args.exclude.split(',')]
+        for scan_type in excluded_types:
+            if scan_type in args.scan_types:
+                args.scan_types.remove(scan_type)
+    
+    # Process custom headers
+    args.custom_headers = {}
+    if args.headers:
+        try:
+            for header_pair in args.headers.split(';'):
+                if ':' in header_pair:
+                    name, value = header_pair.split(':', 1)
+                    args.custom_headers[name.strip()] = value.strip()
+        except Exception:
+            parser.error("Invalid header format. Use 'Header1: value1; Header2: value2'")
+    
+    # Always include User-Agent in custom headers
+    args.custom_headers['User-Agent'] = args.user_agent
+    
+    # Process cookies
+    if args.cookies:
+        args.custom_headers['Cookie'] = args.cookies
     
     # Disable colors if requested
     if args.no_color:
@@ -4253,26 +4649,394 @@ def run_scanner(scanner_class, target_url, args, results, logger):
         logger.error(f"Error during {scanner_name} scan: {str(e)}")
         print(f"{Fore.RED}[ERROR] {scanner_name} scan failed: {str(e)}")
 
-def main():
-    """Main function to run the vulnerability scanner."""
+def run_interactive_mode():
+    """Run the scanner in interactive mode with menu-based options."""
     print_banner()
-    args = parse_arguments()
+    print(f"{Fore.CYAN}Welcome to WebScan Interactive Mode")
+    print(f"{Fore.CYAN}================================={Style.RESET_ALL}")
     
-    logger = setup_logger(args.log_file, logging.DEBUG if args.verbose else logging.INFO, args.no_color)
-    logger.info(f"Starting scan on {args.url}")
+    # Setup the logger
+    logger = setup_logger()
+    
+    while True:
+        print_interactive_menu()
+        choice = input(f"{Fore.GREEN}Enter your choice (0-6): {Style.RESET_ALL}")
+        
+        if choice == '0':
+            print(f"{Fore.CYAN}Exiting WebScan. Thank you for using our tool!{Style.RESET_ALL}")
+            break
+            
+        elif choice == '1':
+            # Quick Scan (headers, info disclosure)
+            target = input(f"{Fore.GREEN}Enter target URL: {Style.RESET_ALL}")
+            if not target:
+                print(f"{Fore.RED}Target URL is required{Style.RESET_ALL}")
+                continue
+                
+            # Create args object with a proper class for compatibility
+            class ScanArgs:
+                def __init__(self):
+                    self.url = None
+                    self.scan_types = None
+                    self.timeout = None
+                    self.threads = None
+                    self.depth = None
+                    self.crawl = None
+                    self.verbose = None
+                    self.output = None
+                    self.user_agent = None
+                    self.custom_headers = None
+                    self.show_progress = None
+                    self.save_state = None
+                    self.risk_threshold = None
+                    self.aggressive = None
+                    self.quiet = None
+                    self.json = None
+            
+            args = ScanArgs()
+            args.url = target
+            args.scan_types = ['headers', 'info']
+            args.timeout = 10
+            args.threads = 5
+            args.depth = 1
+            args.crawl = False
+            args.verbose = False
+            args.output = 'webscan_report.txt'
+            args.user_agent = USER_AGENT
+            args.custom_headers = {'User-Agent': USER_AGENT}
+            args.show_progress = True
+            args.save_state = False
+            args.risk_threshold = 1.0
+            args.aggressive = False
+            args.quiet = False
+            args.json = False
+            
+            # Run the scan
+            run_scan_on_target(args, logger)
+            
+            input(f"{Fore.CYAN}Press Enter to continue...{Style.RESET_ALL}")
+            
+        elif choice == '2':
+            # Standard Scan (SQL injection, XSS, headers, info)
+            target = input(f"{Fore.GREEN}Enter target URL: {Style.RESET_ALL}")
+            if not target:
+                print(f"{Fore.RED}Target URL is required{Style.RESET_ALL}")
+                continue
+                
+            # Create args object for compatibility
+            args = ScanArgs()
+            args.url = target
+            args.scan_types = ['sqli', 'xss', 'headers', 'info']
+            args.timeout = 15
+            args.threads = 10
+            args.depth = 2
+            args.crawl = True
+            args.verbose = False
+            args.output = 'webscan_report.txt'
+            args.user_agent = USER_AGENT
+            args.custom_headers = {'User-Agent': USER_AGENT}
+            args.show_progress = True
+            args.save_state = True
+            args.risk_threshold = 1.0
+            args.aggressive = False
+            args.quiet = False
+            args.json = False
+            
+            # Run the scan
+            run_scan_on_target(args, logger)
+            
+            input(f"{Fore.CYAN}Press Enter to continue...{Style.RESET_ALL}")
+            
+        elif choice == '3':
+            # Full Scan (all checks)
+            target = input(f"{Fore.GREEN}Enter target URL: {Style.RESET_ALL}")
+            if not target:
+                print(f"{Fore.RED}Target URL is required{Style.RESET_ALL}")
+                continue
+                
+            print(f"{Fore.YELLOW}Warning: Full scan may take a long time and generate a lot of traffic.{Style.RESET_ALL}")
+            confirm = input(f"{Fore.GREEN}Do you want to continue? (y/n): {Style.RESET_ALL}").lower()
+            
+            if confirm != 'y':
+                continue
+                
+            # Create args object
+            args = ScanArgs()
+            args.url = target
+            args.scan_types = ['sqli', 'xss', 'port', 'dir', 'files', 'headers', 'ssl', 'info']
+            args.timeout = 20
+            args.threads = 15
+            args.depth = 3
+            args.crawl = True
+            args.verbose = True
+            args.output = 'webscan_full_report.txt'
+            args.user_agent = USER_AGENT
+            args.custom_headers = {'User-Agent': USER_AGENT}
+            args.show_progress = True
+            args.save_state = True
+            args.risk_threshold = 1.0
+            args.aggressive = True
+            args.quiet = False
+            args.json = False
+            
+            # Run the scan
+            run_scan_on_target(args, logger)
+            
+            input(f"{Fore.CYAN}Press Enter to continue...{Style.RESET_ALL}")
+            
+        elif choice == '4':
+            # Custom Scan
+            target = input(f"{Fore.GREEN}Enter target URL: {Style.RESET_ALL}")
+            if not target:
+                print(f"{Fore.RED}Target URL is required{Style.RESET_ALL}")
+                continue
+            
+            print(f"{Fore.CYAN}Available scan types:{Style.RESET_ALL}")
+            scan_types = ['sqli', 'xss', 'port', 'dir', 'files', 'headers', 'ssl', 'info']
+            scan_descriptions = {
+                'sqli': 'SQL Injection vulnerabilities',
+                'xss': 'Cross-Site Scripting (XSS) vulnerabilities',
+                'port': 'Open port scanning',
+                'dir': 'Directory traversal vulnerabilities',
+                'files': 'Sensitive file exposure',
+                'headers': 'HTTP security headers',
+                'ssl': 'SSL/TLS configuration issues',
+                'info': 'Information disclosure'
+            }
+            
+            for i, scan_type in enumerate(scan_types, 1):
+                print(f"  {i}. {scan_type} - {scan_descriptions[scan_type]}")
+            
+            selected = input(f"{Fore.GREEN}Select scan types (comma-separated numbers): {Style.RESET_ALL}")
+            selected_types = []
+            
+            try:
+                for num in selected.split(','):
+                    idx = int(num.strip()) - 1
+                    if 0 <= idx < len(scan_types):
+                        selected_types.append(scan_types[idx])
+            except ValueError:
+                print(f"{Fore.RED}Invalid selection. Using 'headers' and 'info' as defaults.{Style.RESET_ALL}")
+                selected_types = ['headers', 'info']
+            
+            if not selected_types:
+                print(f"{Fore.RED}No valid scan types selected. Using 'headers' and 'info' as defaults.{Style.RESET_ALL}")
+                selected_types = ['headers', 'info']
+            
+            # Additional options
+            threads = input(f"{Fore.GREEN}Number of threads (default: 5): {Style.RESET_ALL}")
+            threads = int(threads) if threads.isdigit() and int(threads) > 0 else 5
+            
+            timeout = input(f"{Fore.GREEN}Request timeout in seconds (default: 10): {Style.RESET_ALL}")
+            timeout = int(timeout) if timeout.isdigit() and int(timeout) > 0 else 10
+            
+            aggressive = input(f"{Fore.GREEN}Enable aggressive scanning? (y/n, default: n): {Style.RESET_ALL}").lower() == 'y'
+            
+            output_format = input(f"{Fore.GREEN}Output format (txt/json, default: txt): {Style.RESET_ALL}").lower()
+            json_output = output_format == 'json'
+            
+            output_file = input(f"{Fore.GREEN}Output file (default: webscan_custom_report.txt): {Style.RESET_ALL}")
+            output_file = output_file if output_file else 'webscan_custom_report.txt'
+            
+            if json_output and not output_file.lower().endswith('.json'):
+                output_file = os.path.splitext(output_file)[0] + '.json'
+            
+            # Create args object
+            args = ScanArgs()
+            args.url = target
+            args.scan_types = selected_types
+            args.timeout = timeout
+            args.threads = threads
+            args.depth = 2
+            args.crawl = True
+            args.verbose = True
+            args.output = output_file
+            args.user_agent = USER_AGENT
+            args.custom_headers = {'User-Agent': USER_AGENT}
+            args.show_progress = True
+            args.save_state = True
+            args.risk_threshold = 1.0
+            args.aggressive = aggressive
+            args.quiet = False
+            args.json = json_output
+            
+            # Run the scan
+            run_scan_on_target(args, logger)
+            
+            input(f"{Fore.CYAN}Press Enter to continue...{Style.RESET_ALL}")
+            
+        elif choice == '5':
+            # Target Discovery (port scan, harvesting)
+            target_spec = input(f"{Fore.GREEN}Enter target (IP, domain, or CIDR range): {Style.RESET_ALL}")
+            if not target_spec:
+                print(f"{Fore.RED}Target specification is required{Style.RESET_ALL}")
+                continue
+            
+            # Create args object
+            args = ScanArgs()
+            args.url = target_spec
+            args.scan_types = ['port', 'info']
+            args.timeout = 5
+            args.threads = 20
+            args.depth = 1
+            args.crawl = False
+            args.verbose = True
+            args.output = 'webscan_discovery_report.txt'
+            args.user_agent = USER_AGENT
+            args.custom_headers = {'User-Agent': USER_AGENT}
+            args.show_progress = True
+            args.save_state = False
+            args.risk_threshold = 1.0
+            args.aggressive = False
+            args.quiet = False
+            args.json = False
+            args.target_list = None
+            
+            # Expand targets if it's a CIDR range
+            targets = expand_targets(target_spec)
+            
+            if len(targets) > 1:
+                print(f"{Fore.CYAN}Expanded to {len(targets)} targets{Style.RESET_ALL}")
+                
+                for i, target in enumerate(targets[:10], 1):
+                    print(f"  {i}. {target}")
+                
+                if len(targets) > 10:
+                    print(f"  ... and {len(targets) - 10} more")
+                
+                confirm = input(f"{Fore.GREEN}Scan all these targets? (y/n): {Style.RESET_ALL}").lower()
+                
+                if confirm != 'y':
+                    continue
+                
+                # Use the first target as a template and scan all targets
+                for target in targets:
+                    args.url = target
+                    run_scan_on_target(args, logger, show_summary=False)
+                
+                print(f"{Fore.GREEN}All targets scanned. Results saved to {args.output}{Style.RESET_ALL}")
+            else:
+                # Just one target
+                run_scan_on_target(args, logger)
+            
+            input(f"{Fore.CYAN}Press Enter to continue...{Style.RESET_ALL}")
+            
+        elif choice == '6':
+            # Resume Previous Scan
+            # List available resume files
+            resume_dir = Path('.')
+            resume_files = list(resume_dir.glob('webscan_state_*.json'))
+            
+            if not resume_files:
+                print(f"{Fore.RED}No resume files found{Style.RESET_ALL}")
+                input(f"{Fore.CYAN}Press Enter to continue...{Style.RESET_ALL}")
+                continue
+            
+            print(f"{Fore.CYAN}Available resume files:{Style.RESET_ALL}")
+            for i, file in enumerate(resume_files, 1):
+                print(f"  {i}. {file.name}")
+            
+            selection = input(f"{Fore.GREEN}Select a file to resume (number): {Style.RESET_ALL}")
+            
+            try:
+                idx = int(selection) - 1
+                if 0 <= idx < len(resume_files):
+                    resume_file = str(resume_files[idx])
+                    resume_data = load_scan_state(resume_file)
+                    
+                    if not resume_data:
+                        print(f"{Fore.RED}Error loading resume data{Style.RESET_ALL}")
+                        continue
+                    
+                    print(f"{Fore.CYAN}Resuming scan for {resume_data.get('target_url', 'unknown')}{Style.RESET_ALL}")
+                    
+                    # Create args object from resume data
+                    args = ScanArgs()
+                    args.url = resume_data.get('target_url')
+                    args.scan_types = resume_data.get('scan_types', ['headers', 'info'])
+                    args.timeout = resume_data.get('timeout', 10)
+                    args.threads = resume_data.get('threads', 5)
+                    args.depth = resume_data.get('depth', 2)
+                    args.crawl = resume_data.get('crawl', False)
+                    args.verbose = resume_data.get('verbose', False)
+                    args.output = resume_data.get('output_file', 'webscan_resumed_report.txt')
+                    args.user_agent = resume_data.get('user_agent', USER_AGENT)
+                    args.custom_headers = resume_data.get('custom_headers', {'User-Agent': USER_AGENT})
+                    args.show_progress = True
+                    args.save_state = True
+                    args.risk_threshold = resume_data.get('risk_threshold', 1.0)
+                    args.aggressive = resume_data.get('aggressive', False)
+                    args.quiet = False
+                    args.json = resume_data.get('json_output', False)
+                    args.resume = resume_file
+                    
+                    # Run the scan
+                    run_scan_on_target(args, logger)
+                else:
+                    print(f"{Fore.RED}Invalid selection{Style.RESET_ALL}")
+            except ValueError:
+                print(f"{Fore.RED}Invalid selection{Style.RESET_ALL}")
+            
+            input(f"{Fore.CYAN}Press Enter to continue...{Style.RESET_ALL}")
+            
+        else:
+            print(f"{Fore.RED}Invalid choice. Please try again.{Style.RESET_ALL}")
+    
+    return 0
+
+
+def run_scan_on_target(args, logger, show_summary=True):
+    """Run a scan on a specific target with given args."""
+    global SCAN_INTERRUPTED
+    SCAN_INTERRUPTED = False
+    
+    # Register signal handler for interruption
+    signal.signal(signal.SIGINT, signal_handler)
+    
+    # Ensure the target URL has a valid format
+    if args.url and not args.url.startswith(('http://', 'https://')):
+        args.url = f"http://{args.url}"
     
     start_time = time.time()
     
-    # Check if URL is accessible
-    print(f"{Fore.CYAN}[INFO] Checking target URL accessibility...")
-    if not is_url_accessible(args.url, args.timeout):
-        print(f"{Fore.RED}[ERROR] Target URL {args.url} is not accessible.")
-        logger.error(f"Target URL {args.url} is not accessible")
-        sys.exit(1)
+    # Initialize the resume state
+    if hasattr(args, 'resume') and args.resume:
+        resume_data = load_scan_state(args.resume)
+        if resume_data:
+            print(f"{Fore.CYAN}[INFO] Resuming scan from previously saved state")
+            # Retrieve completed URLs and other state data
+            completed_urls = resume_data.get('completed_urls', [])
+            all_results = resume_data.get('vulnerabilities', [])
+        else:
+            print(f"{Fore.RED}[ERROR] Failed to load resume data. Starting a new scan")
+            completed_urls = []
+            all_results = []
+    else:
+        completed_urls = []
+        all_results = []
     
-    print(f"{Fore.GREEN}[SUCCESS] Target URL is accessible")
-    print(f"{Fore.CYAN}[INFO] Starting vulnerability scan on {args.url}")
-    print(f"{Fore.CYAN}[INFO] Scan types: {', '.join(args.scan_types)}")
+    # Create state file name for saving progress
+    scan_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    state_file = f"webscan_state_{scan_timestamp}.json"
+    
+    # Check if URL is accessible
+    if not args.quiet:
+        print(f"{Fore.CYAN}[INFO] Checking target URL accessibility...")
+    
+    try:
+        if not is_url_accessible(args.url, args.timeout):
+            print(f"{Fore.RED}[ERROR] Target URL {args.url} is not accessible.")
+            logger.error(f"Target URL {args.url} is not accessible")
+            return 1
+    except Exception as e:
+        print(f"{Fore.RED}[ERROR] Error checking URL accessibility: {str(e)}")
+        logger.error(f"Error checking URL accessibility: {str(e)}")
+        return 1
+    
+    if not args.quiet:
+        print(f"{Fore.GREEN}[SUCCESS] Target URL is accessible")
+        print(f"{Fore.CYAN}[INFO] Starting vulnerability scan on {args.url}")
+        print(f"{Fore.CYAN}[INFO] Scan types: {', '.join(args.scan_types)}")
     
     # Initialize Reporter
     reporter = Reporter(args.output)
@@ -4293,8 +5057,17 @@ def main():
     # Select scanners based on requested types
     scanners_to_run = [scanner_map[scan_type] for scan_type in args.scan_types if scan_type in scanner_map]
     
-    # Results collection
-    all_results = []
+    # Initialize progress indicator if requested
+    total_scanners = len(scanners_to_run)
+    progress = None
+    
+    if hasattr(args, 'show_progress') and args.show_progress and not args.quiet:
+        progress = ProgressIndicator(
+            total_items=total_scanners,
+            prefix=f'{Fore.CYAN}Scan Progress:',
+            suffix='Complete',
+            length=40
+        )
     
     # Run scanners with multi-threading
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.threads) as executor:
@@ -4308,45 +5081,221 @@ def main():
             scanner_name = future_to_scanner[future]
             try:
                 future.result()  # Get any exceptions that may have been raised
-                print(f"{Fore.GREEN}[COMPLETE] {scanner_name} scan finished")
+                
+                if not args.quiet:
+                    print(f"{Fore.GREEN}[COMPLETE] {scanner_name} scan finished")
+                
+                # Update progress indicator
+                if progress:
+                    progress.update()
+                
+                # Update completed scanners for resume
+                completed_urls.append(scanner_name)
+                
+                # Save progress state if requested
+                if hasattr(args, 'save_state') and args.save_state:
+                    state_data = {
+                        'target_url': args.url,
+                        'scan_types': args.scan_types,
+                        'completed_urls': completed_urls,
+                        'vulnerabilities': all_results,
+                        'timeout': getattr(args, 'timeout', 10),
+                        'threads': getattr(args, 'threads', 5),
+                        'depth': getattr(args, 'depth', 2),
+                        'crawl': getattr(args, 'crawl', False),
+                        'verbose': getattr(args, 'verbose', False),
+                        'output_file': getattr(args, 'output', 'webscan_report.txt'),
+                        'user_agent': getattr(args, 'user_agent', USER_AGENT),
+                        'custom_headers': getattr(args, 'custom_headers', {'User-Agent': USER_AGENT}),
+                        'risk_threshold': getattr(args, 'risk_threshold', 1.0),
+                        'aggressive': getattr(args, 'aggressive', False),
+                        'json_output': getattr(args, 'json', False),
+                        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    }
+                    save_scan_state(state_file, state_data)
+                
+                # Check for user interruption
+                if SCAN_INTERRUPTED:
+                    break
+                
             except Exception as e:
-                print(f"{Fore.RED}[ERROR] {scanner_name} scan failed: {str(e)}")
+                if not args.quiet:
+                    print(f"{Fore.RED}[ERROR] {scanner_name} scan failed: {str(e)}")
+                
+                # Update progress indicator even on failure
+                if progress:
+                    progress.update()
+    
+    # Make sure progress indicator shows completion
+    if progress:
+        progress.finish()
+    
+    # If scan was interrupted, save state and exit
+    if SCAN_INTERRUPTED:
+        state_data = {
+            'target_url': args.url,
+            'scan_types': args.scan_types,
+            'completed_urls': completed_urls,
+            'vulnerabilities': all_results,
+            'timeout': getattr(args, 'timeout', 10),
+            'threads': getattr(args, 'threads', 5),
+            'depth': getattr(args, 'depth', 2),
+            'crawl': getattr(args, 'crawl', False),
+            'verbose': getattr(args, 'verbose', False),
+            'output_file': getattr(args, 'output', 'webscan_report.txt'),
+            'user_agent': getattr(args, 'user_agent', USER_AGENT),
+            'custom_headers': getattr(args, 'custom_headers', {'User-Agent': USER_AGENT}),
+            'risk_threshold': getattr(args, 'risk_threshold', 1.0),
+            'aggressive': getattr(args, 'aggressive', False),
+            'json_output': getattr(args, 'json', False),
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        
+        saved = save_scan_state(state_file, state_data)
+        if saved:
+            print(f"{Fore.YELLOW}[WARNING] Scan interrupted. Progress saved to {state_file}")
+            print(f"{Fore.YELLOW}[WARNING] Resume with: python webscan_standalone.py --resume {state_file}")
+        else:
+            print(f"{Fore.RED}[ERROR] Scan interrupted. Failed to save state.")
+        
+        return 1
+    
+    # Filter vulnerabilities based on risk threshold if specified
+    if hasattr(args, 'risk_threshold') and args.risk_threshold > 1.0:
+        filtered_results = []
+        for vuln in all_results:
+            risk_score = calculate_risk_score(vuln)
+            if risk_score >= args.risk_threshold:
+                # Add risk score to the vulnerability
+                vuln['risk_score'] = risk_score
+                filtered_results.append(vuln)
+        
+        if not args.quiet and len(filtered_results) < len(all_results):
+            print(f"{Fore.YELLOW}[INFO] Filtered out {len(all_results) - len(filtered_results)} vulnerabilities below risk threshold {args.risk_threshold}")
+        
+        all_results = filtered_results
+    else:
+        # Add risk scores to all vulnerabilities
+        for vuln in all_results:
+            vuln['risk_score'] = calculate_risk_score(vuln)
     
     # Generate report
     reporter.add_vulnerabilities(all_results)
     report_path = reporter.finalize_report(time.time() - start_time)
     
-    # Summary
-    total_time = time.time() - start_time
-    vulnerabilities_count = len(all_results)
-    
-    print(f"\n{Fore.CYAN}{'=' * 60}")
-    print(f"{Fore.CYAN}[SCAN SUMMARY]")
-    print(f"{Fore.CYAN}{'=' * 60}")
-    print(f"{Fore.WHITE}Target URL: {args.url}")
-    print(f"{Fore.WHITE}Scan Duration: {total_time:.2f} seconds")
-    print(f"{Fore.WHITE}Vulnerabilities Found: {vulnerabilities_count}")
-    print(f"{Fore.WHITE}Report saved to: {report_path}")
-    print(f"{Fore.CYAN}{'=' * 60}\n")
-    
-    if vulnerabilities_count > 0:
-        severity_counts = {'Critical': 0, 'High': 0, 'Medium': 0, 'Low': 0, 'Info': 0}
-        for result in all_results:
-            severity_counts[result['severity']] = severity_counts.get(result['severity'], 0) + 1
+    # Show summary if requested
+    if show_summary and not args.quiet:
+        # Summary
+        total_time = time.time() - start_time
+        vulnerabilities_count = len(all_results)
         
-        print(f"{Fore.CYAN}[VULNERABILITY SUMMARY]")
-        for severity, count in severity_counts.items():
-            if count > 0:
-                color = Fore.RED if severity in ['Critical', 'High'] else (
-                    Fore.YELLOW if severity == 'Medium' else (
-                        Fore.BLUE if severity == 'Low' else Fore.WHITE
+        print(f"\n{Fore.CYAN}{'=' * 60}")
+        print(f"{Fore.CYAN}[SCAN SUMMARY]")
+        print(f"{Fore.CYAN}{'=' * 60}")
+        print(f"{Fore.WHITE}Target URL: {args.url}")
+        print(f"{Fore.WHITE}Scan Duration: {total_time:.2f} seconds")
+        print(f"{Fore.WHITE}Vulnerabilities Found: {vulnerabilities_count}")
+        print(f"{Fore.WHITE}Report saved to: {report_path}")
+        print(f"{Fore.CYAN}{'=' * 60}\n")
+        
+        if vulnerabilities_count > 0:
+            severity_counts = {'Critical': 0, 'High': 0, 'Medium': 0, 'Low': 0, 'Info': 0}
+            for result in all_results:
+                severity_counts[result['severity']] = severity_counts.get(result['severity'], 0) + 1
+            
+            print(f"{Fore.CYAN}[VULNERABILITY SUMMARY]")
+            for severity, count in severity_counts.items():
+                if count > 0:
+                    color = Fore.RED if severity in ['Critical', 'High'] else (
+                        Fore.YELLOW if severity == 'Medium' else (
+                            Fore.BLUE if severity == 'Low' else Fore.WHITE
+                        )
                     )
-                )
-                print(f"{color}{severity}: {count}")
+                    print(f"{color}{severity}: {count}")
     
-    logger.info(f"Scan completed. Found {vulnerabilities_count} vulnerabilities. Report saved to {report_path}")
+    logger.info(f"Scan completed. Found {len(all_results)} vulnerabilities. Report saved to {report_path}")
     
     return 0
+
+
+def main():
+    """Main function to run the vulnerability scanner."""
+    # Setup signal handler for clean exit
+    signal.signal(signal.SIGINT, signal_handler)
+    
+    print_banner()
+    args = parse_arguments()
+    
+    # Setup logging
+    log_level = logging.DEBUG if args.verbose else (logging.ERROR if args.quiet else logging.INFO)
+    logger = setup_logger(args.log_file, log_level, args.no_color)
+    
+    # Interactive mode
+    if args.interactive:
+        return run_interactive_mode()
+    
+    # Resume mode
+    if args.resume:
+        resume_data = load_scan_state(args.resume)
+        if not resume_data:
+            print(f"{Fore.RED}[ERROR] Failed to load resume data from {args.resume}")
+            return 1
+        
+        # Override args with resume data
+        args.url = resume_data.get('target_url')
+        args.scan_types = resume_data.get('scan_types', args.scan_types)
+        args.timeout = resume_data.get('timeout', args.timeout)
+        args.threads = resume_data.get('threads', args.threads)
+        args.depth = resume_data.get('depth', args.depth)
+        
+        print(f"{Fore.CYAN}[INFO] Resuming scan for {args.url}")
+    
+    # Expand targets if using target list
+    targets = []
+    if args.target_list:
+        targets = expand_targets(args.url, args.target_list)
+        print(f"{Fore.CYAN}[INFO] Loaded {len(targets)} targets from {args.target_list}")
+    elif args.url and ('/' in args.url and not args.url.startswith(('http://', 'https://'))):
+        # It might be a CIDR range
+        targets = expand_targets(args.url)
+        print(f"{Fore.CYAN}[INFO] Expanded target to {len(targets)} targets")
+    else:
+        # Single target
+        targets = [args.url]
+    
+    # Single target or multiple targets
+    if len(targets) == 1:
+        args.url = targets[0]
+        return run_scan_on_target(args, logger)
+    else:
+        # Process multiple targets
+        successful = 0
+        failed = 0
+        
+        for target in targets:
+            print(f"{Fore.CYAN}[INFO] Scanning target: {target}")
+            args.url = target
+            
+            # Adjust output file for each target
+            if args.output:
+                base_name, ext = os.path.splitext(args.output)
+                args.output = f"{base_name}_{urlparse(target).netloc.replace(':', '_')}{ext}"
+            
+            result = run_scan_on_target(args, logger, show_summary=True)
+            
+            if result == 0:
+                successful += 1
+            else:
+                failed += 1
+            
+            # Check for user interruption
+            if SCAN_INTERRUPTED:
+                print(f"{Fore.YELLOW}[WARNING] Scan interrupted by user after {successful} successful and {failed} failed scans")
+                break
+        
+        print(f"{Fore.CYAN}[INFO] Completed scanning {successful + failed} targets ({successful} successful, {failed} failed)")
+        
+        return 0 if failed == 0 else 1
 
 if __name__ == "__main__":
     sys.exit(main())

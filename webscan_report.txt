@@ -7,12 +7,42 @@ SCAN INFORMATION
 --------------------------------------------------------------------------------
 Target URL: https://example.com
 Scan Types: ssl
-Start Time: 2025-04-07 21:26:21
-Duration: 0.45 seconds
-Vulnerabilities Found: 0
+Start Time: 2025-04-07 21:37:27
+Duration: 0.63 seconds
+Vulnerabilities Found: 3
 
-No vulnerabilities were found.
+VULNERABILITY SUMMARY
+--------------------------------------------------------------------------------
+Critical: 1
+High: 1
+Medium: 1
+
+DETAILED FINDINGS
+================================================================================
+
+Insecure Protocol
+-----------------
+Severity: Critical
+URL: https://example.com
+Details: SSLv3 is vulnerable to POODLE attack
+Protocol: SSLv3
+Recommendation: Disable SSLv3 on the server
+
+----------------------------------------
+Severity: High
+URL: https://example.com
+Details: TLSv1.0 is outdated and potentially insecure
+Protocol: TLSv1.0
+Recommendation: Disable TLSv1.0 on the server
+
+----------------------------------------
+Severity: Medium
+URL: https://example.com
+Details: TLSv1.1 is outdated and should be upgraded
+Protocol: TLSv1.1
+Recommendation: Upgrade to TLSv1.2 or TLSv1.3
+
 
 ================================================================================
-Report generated at: 2025-04-07 21:26:22
+Report generated at: 2025-04-07 21:37:28
 ================================================================================
