@@ -1,25 +1,50 @@
 ================================================================================
 WebScan v1.2.0 - Advanced Vulnerability Report
 Developed by AMKUSH
-Generated: 2025-04-07 22:05:33
+Generated: 2025-04-07 22:09:08
 ================================================================================
 
 SCAN INFORMATION
 --------------------------------------------------------------------------------
 Target URL: https://example.com
-Scan Types: headers
-Start Time: 2025-04-07 22:05:33
-Duration: 0.22 seconds
-Vulnerabilities Found: 10
+Scan Types: sqli, xss, port, dir, files, headers, ssl, info
+Start Time: 2025-04-07 22:05:47
+Duration: 200.92 seconds
+Vulnerabilities Found: 16
 
 VULNERABILITY SUMMARY
 --------------------------------------------------------------------------------
-Medium: 4
-Low: 4
+Critical: 1
+High: 1
+Medium: 6
+Low: 6
 Info: 2
 
 DETAILED FINDINGS
 ================================================================================
+
+Insecure Protocol
+-----------------
+Severity: Critical
+URL: https://example.com
+Details: SSLv3 is vulnerable to POODLE attack
+Protocol: SSLv3
+Recommendation: Disable SSLv3 on the server
+
+----------------------------------------
+Severity: High
+URL: https://example.com
+Details: TLSv1.0 is outdated and potentially insecure
+Protocol: TLSv1.0
+Recommendation: Disable TLSv1.0 on the server
+
+----------------------------------------
+Severity: Medium
+URL: https://example.com
+Details: TLSv1.1 is outdated and should be upgraded
+Protocol: TLSv1.1
+Recommendation: Upgrade to TLSv1.2 or TLSv1.3
+
 
 Missing Security Header
 -----------------------
@@ -93,6 +118,30 @@ Header: Clear-Site-Data
 Recommendation: Use Clear-Site-Data header on logout pages
 
 
+Information Disclosure
+----------------------
+Severity: Medium
+URL: https://example.com
+Details: Found File Path: /html, /css, /domains/example
+Recommendation: Remove file path from the page source
+
+
+Open Port
+---------
+Severity: Low
+Details: Port 80 (HTTP) is open on example.com
+Port: 80
+Service: HTTP
+Recommendation: Close unnecessary ports and implement proper firewall rules
+
+----------------------------------------
+Severity: Low
+Details: Port 443 (HTTPS) is open on example.com
+Port: 443
+Service: HTTPS
+Recommendation: Close unnecessary ports and implement proper firewall rules
+
+
 ================================================================================
-Report generated at: 2025-04-07 22:05:33
+Report generated at: 2025-04-07 22:09:08
 ================================================================================
