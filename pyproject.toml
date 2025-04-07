@@ -7,4 +7,5 @@ dependencies = [
     "beautifulsoup4>=4.13.3",
     "colorama>=0.4.6",
     "requests>=2.32.3",
+    "trafilatura>=2.0.0",
 ]
