@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # WebScan - Advanced Website Vulnerability Scanner
 
 An advanced Python-powered website vulnerability scanning tool that provides comprehensive security assessments with intelligent detection and reporting capabilities.
@@ -154,3 +155,6 @@ Developed by AMKUSH
 ## License
 
 This project is available for educational purposes only.
+=======
+# Webscanner
+>>>>>>> da96f37a3ee2a73d7ce8e8aa2b6ac3c6fbb2b855
