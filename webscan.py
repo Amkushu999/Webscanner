@@ -22,6 +22,7 @@ from scanners.directory_traversal import DirectoryTraversalScanner
 from scanners.sensitive_files import SensitiveFileScanner
 from scanners.http_headers import HTTPHeaderScanner
 from scanners.ssl_tls import SSLTLSScanner
+from scanners.info_disclosure import InfoDisclosureScanner
 
 from utils.logger import setup_logger
 from utils.reporter import Reporter
@@ -90,7 +91,8 @@ port: Open Port Scanning
 dir: Directory Traversal
 files: Sensitive Files
 headers: HTTP Headers
-ssl: SSL/TLS''',
+ssl: SSL/TLS
+info: Information Disclosure''',
                         default='all')
     
     parser.add_argument('--user-agent', 
@@ -114,10 +116,10 @@ ssl: SSL/TLS''',
     
     # Process scan types
     if args.scan_type == 'all':
-        args.scan_types = ['sqli', 'xss', 'port', 'dir', 'files', 'headers', 'ssl']
+        args.scan_types = ['sqli', 'xss', 'port', 'dir', 'files', 'headers', 'ssl', 'info']
     else:
         args.scan_types = [s.strip() for s in args.scan_type.split(',')]
-        valid_types = ['sqli', 'xss', 'port', 'dir', 'files', 'headers', 'ssl']
+        valid_types = ['sqli', 'xss', 'port', 'dir', 'files', 'headers', 'ssl', 'info']
         for scan_type in args.scan_types:
             if scan_type not in valid_types:
                 parser.error(f"Invalid scan type: {scan_type}")
@@ -181,7 +183,8 @@ def main():
         'dir': DirectoryTraversalScanner,
         'files': SensitiveFileScanner,
         'headers': HTTPHeaderScanner,
-        'ssl': SSLTLSScanner
+        'ssl': SSLTLSScanner,
+        'info': InfoDisclosureScanner
     }
     
     # Select scanners based on requested types

