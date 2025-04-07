@@ -51,6 +51,22 @@ args = "Standalone Help"
 task = "workflow.run"
 args = "Info Disclosure Demo"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Telegram Bot Demo"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Telegram Bot Usage"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Telegram Bot Demo Conversation"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Running Telegram Bot"
+
 [[workflows.workflow]]
 name = "WebScan Runner"
 author = "agent"
@@ -190,6 +206,244 @@ task = "packager.installForAll"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "python webscan_standalone.py https://example.com --scan-type info -v"
+
+[[workflows.workflow]]
+name = "Telegram Bot Demo"
+author = "agent"
+
+[workflows.workflow.metadata]
+agentRequireRestartOnSave = false
+
+[[workflows.workflow.tasks]]
+task = "packager.installForAll"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python run_telegram_bot.py --help"
+
+[[workflows.workflow]]
+name = "Telegram Bot Usage"
+author = "agent"
+
+[workflows.workflow.metadata]
+agentRequireRestartOnSave = false
+
+[[workflows.workflow.tasks]]
+task = "packager.installForAll"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = """
+echo \"To start the Telegram bot, you would use:\"
+echo \"python run_telegram_bot.py --token YOUR_TELEGRAM_BOT_TOKEN\"
+echo \"\"
+echo \"You need to provide a valid Telegram bot token from @BotFather.\"
+echo \"The bot will start and listen for commands from Telegram users.\"
+echo \"\"
+echo \"Example:\"
+echo \"export TELEGRAM_BOT_TOKEN=1234567890:ABCdefGHIjklMNOpqrSTUvwxYZ\"
+echo \"export AUTHORIZED_USERS=123456789,987654321\"
+echo \"python run_telegram_bot.py\""""
+
+[[workflows.workflow]]
+name = "Telegram Bot Demo Conversation"
+author = "agent"
+
+[workflows.workflow.metadata]
+agentRequireRestartOnSave = false
+
+[[workflows.workflow.tasks]]
+task = "packager.installForAll"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = '''
+cat << 'EOF' | python -c "
+import sys
+from colorama import init, Fore, Style
+
+init(autoreset=True)
+
+text = sys.stdin.read()
+lines = text.split('\n')
+
+for line in lines:
+    if line.startswith('User:'):
+        print(f'{Fore.CYAN}{line}{Style.RESET_ALL}')
+    elif line.startswith('Bot:'):
+        print(f'{Fore.GREEN}{line}{Style.RESET_ALL}')
+    elif line == '---':
+        print(f'{Fore.YELLOW}----------------------{Style.RESET_ALL}')
+    else:
+        print(line)
+"
+
+User: /start
+
+Bot: 👋 Hi Alex! Welcome to the WebScan Telegram Bot.
+
+I can help you run security scans on websites directly from Telegram.
+
+🔍 Use /scan to start a new vulnerability scan
+❓ Use /help to see all available commands
+ℹ️ Use /about to learn more about this bot
+
+Version: WebScan v1.2.0
+
+---
+
+User: /scan
+
+Bot: 🔍 Let's start a website vulnerability scan.
+
+Please enter the URL you want to scan (e.g., https://example.com):
+
+Make sure to include the full URL with http:// or https://
+
+User: https://example.com
+
+Bot: 🎯 Target: https://example.com
+
+Now, let's configure your scan. Choose from the options below:
+[Scan Types] [Scan Depth]
+[Threads] [Timeout]
+[Verbose Mode] [Aggressive Mode]
+[✅ Run Scan] [❌ Cancel]
+
+User: (clicks Scan Types)
+
+Bot: Select the scan types you want to run:
+[All Types - All scan types (comprehensive)]
+[sqli - SQL Injection (database vulnerabilities)] [xss - Cross-Site Scripting (injection attacks)]
+[port - Open Port Scanning (service detection)] [dir - Directory Traversal (path manipulation)]
+[files - Sensitive Files (configs, backups, logs)] [headers - HTTP Headers (security header issues)]
+[ssl - SSL/TLS (weak ciphers, protocols)] [info - Information Disclosure (metadata, paths)]
+[✅ Done]
+
+User: (selects headers, ssl, info and clicks Done)
+
+Bot: 🎯 Target: https://example.com
+🔍 Scan Types: headers, ssl, info
+
+Configure other scan options:
+[Scan Types] [Scan Depth]
+[Threads] [Timeout]
+[Verbose Mode] [Aggressive Mode]
+[✅ Run Scan] [❌ Cancel]
+
+User: (clicks Run Scan)
+
+Bot: 📋 Scan Configuration Preview:
+
+🎯 Target: https://example.com
+🔍 Scan Types: headers, ssl, info
+🔄 Threads: 3
+🕸️ Depth: 1
+⏱️ Timeout: 10s
+🔊 Verbose: Yes
+⚡ Aggressive: No
+
+Confirm to start the scan?
+[✅ Confirm]
+[🔙 Back to Config]
+[❌ Cancel]
+
+User: (clicks Confirm)
+
+Bot: 🚀 Initializing scan...
+
+Bot: 🔍 Starting scan...
+
+Target: https://example.com
+Scan types: headers, ssl, info
+
+This may take a while depending on the target and scan configuration.
+
+--- (After scan completes) ---
+
+Bot: ✅ Scan completed for https://example.com
+
+Scan duration: 12.5 seconds
+
+📋 Summary of findings:
+
+Bot: ```
+WebScan v1.2.0 - Scan Report
+==============================
+Target: https://example.com
+Scan Date: 2025-04-07 22:45:31
+Scan Duration: 12.5 seconds
+
+FINDINGS SUMMARY
+==============================
+Total Vulnerabilities: 5
+- Critical: 0
+- High: 2
+- Medium: 1
+- Low: 2
+
+VULNERABILITY DETAILS
+==============================
+[HIGH] SSL/TLS - Insecure Protocol: SSLv3
+  Description: The server supports an insecure protocol (SSLv3)
+  Risk: Could allow attackers to perform POODLE attacks
+  CVE: CVE-2014-3566
+  
+[HIGH] SSL/TLS - Insecure Protocol: TLSv1.0
+  Description: The server supports an outdated protocol (TLSv1.0)
+  Risk: Increased susceptibility to BEAST attacks
+  CVE: CVE-2011-3389
+  
+[MEDIUM] HTTP Headers - Missing Headers
+  Description: Security headers not implemented
+  Missing Headers:
+  - Content-Security-Policy
+  - X-XSS-Protection
+  
+[LOW] Information Disclosure - File Paths
+  Description: Server reveals system file paths in responses
+  
+[LOW] HTTP Headers - Server Information
+  Description: Server header reveals software and version
+  
+RECOMMENDATIONS
+==============================
+1. Disable support for SSLv3 and TLSv1.0
+2. Implement recommended security headers
+3. Configure server to prevent information leakage
+
+For detailed remediation steps, see full report.
+...
+```
+
+Bot: What would you like to do next?
+[🔄 Run Another Scan]
+[📊 Show Detailed Report]
+
+User: (clicks Run Another Scan)
+
+Bot: 🔍 Let's start a new website vulnerability scan.
+
+Please enter the URL you want to scan (e.g., https://example.com):
+
+Make sure to include the full URL with http:// or https://
+EOF'''
+
+[[workflows.workflow]]
+name = "Running Telegram Bot"
+author = "agent"
+
+[workflows.workflow.metadata]
+agentRequireRestartOnSave = false
+
+[[workflows.workflow.tasks]]
+task = "packager.installForAll"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = """
+export TELEGRAM_BOT_TOKEN=\"7914945569:AAE16PgI01ln7QB_5SN85r0IOybJ_KjlBPo\"
+python run_telegram_bot.py"""
 
 [deployment]
 run = ["sh", "-c", "python webscan.py -h"]
