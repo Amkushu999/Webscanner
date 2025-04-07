@@ -33,6 +33,35 @@ def main():
         help="Comma-separated list of authorized user IDs (can also be set via AUTHORIZED_USERS env var)"
     )
     
+    parser.add_argument(
+        "--max-users",
+        type=int,
+        default=1000000,
+        help="Maximum number of users to support (default: 1,000,000)"
+    )
+    
+    parser.add_argument(
+        "--max-scans",
+        type=int,
+        default=1000000,
+        help="Maximum number of concurrent scans (default: 1,000,000)"
+    )
+    
+    parser.add_argument(
+        "--max-threads",
+        type=int,
+        default=100,
+        help="Maximum number of concurrent scan threads (default: 100)"
+    )
+    
+    parser.add_argument(
+        "--optimization-level",
+        type=int,
+        choices=[1, 2, 3],
+        default=2,
+        help="Memory optimization level (1=low, 2=medium, 3=aggressive)"
+    )
+    
     args = parser.parse_args()
     
     # Set environment variables if provided
@@ -40,6 +69,12 @@ def main():
         os.environ["TELEGRAM_BOT_TOKEN"] = args.token
     if args.users:
         os.environ["AUTHORIZED_USERS"] = args.users
+        
+    # Set environment variables for configuration
+    os.environ["MAX_USERS"] = str(args.max_users)
+    os.environ["MAX_SCANS"] = str(args.max_scans)
+    os.environ["MAX_THREADS"] = str(args.max_threads)
+    os.environ["OPTIMIZATION_LEVEL"] = str(args.optimization_level)
     
     # Check if token is available
     if "TELEGRAM_BOT_TOKEN" not in os.environ:

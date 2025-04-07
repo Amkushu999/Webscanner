@@ -63,10 +63,6 @@ args = "Telegram Bot Usage"
 task = "workflow.run"
 args = "Telegram Bot Demo Conversation"
 
-[[workflows.workflow.tasks]]
-task = "workflow.run"
-args = "Running Telegram Bot"
-
 [[workflows.workflow]]
 name = "WebScan Runner"
 author = "agent"
@@ -428,22 +424,6 @@ Please enter the URL you want to scan (e.g., https://example.com):
 
 Make sure to include the full URL with http:// or https://
 EOF'''
-
-[[workflows.workflow]]
-name = "Running Telegram Bot"
-author = "agent"
-
-[workflows.workflow.metadata]
-agentRequireRestartOnSave = false
-
-[[workflows.workflow.tasks]]
-task = "packager.installForAll"
-
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = """
-export TELEGRAM_BOT_TOKEN=\"7914945569:AAE16PgI01ln7QB_5SN85r0IOybJ_KjlBPo\"
-python run_telegram_bot.py"""
 
 [deployment]
 run = ["sh", "-c", "python webscan.py -h"]

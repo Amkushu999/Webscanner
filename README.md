@@ -9,6 +9,7 @@ An advanced Python-powered website vulnerability scanning tool that provides com
 - **Comprehensive Security Testing**: Multiple scan modules for different vulnerability types
 - **Detailed Reporting**: Risk-based reporting with actionable insights
 - **Telegram Bot Integration**: Run scans remotely and receive notifications
+- **High-Performance Architecture**: Designed to handle over 1 million concurrent instances
 
 ## Available Scan Types
 
@@ -79,6 +80,19 @@ export TELEGRAM_BOT_TOKEN=your_bot_token
 export AUTHORIZED_USERS=12345678,87654321
 python run_telegram_bot.py
 ```
+
+#### Advanced Performance Options
+
+For high-scale deployments, the following options are available:
+
+```
+python run_telegram_bot.py --max-users 1000000 --max-scans 1000000 --max-threads 100 --optimization-level 2
+```
+
+- `--max-users`: Maximum number of users to support (default: 1,000,000)
+- `--max-scans`: Maximum number of concurrent scans (default: 1,000,000)
+- `--max-threads`: Maximum number of concurrent scan threads (default: 100)
+- `--optimization-level`: Memory optimization level (1=low, 2=medium, 3=aggressive)
 
 #### Using the Bot
 
