@@ -238,44 +238,177 @@ class DirectoryTraversalScanner:
         
         return payload_urls
     
-    def _is_traversal_successful(self, response_content):
+    def _is_traversal_successful(self, response_content, response_status=None, response_headers=None):
         """
-        Check if the directory traversal attempt was successful.
+        Check if the directory traversal attempt was successful using multiple detection techniques.
+        Uses aggressive pattern matching and content analysis for real exploitation confirmation.
         
         Args:
             response_content (str): The response content to check
+            response_status (int, optional): The HTTP status code of the response
+            response_headers (dict, optional): The HTTP headers of the response
             
         Returns:
             bool: True if directory traversal was successful, False otherwise
         """
+        # Check for standard file content patterns
         for pattern in self.compiled_patterns:
             if pattern.search(response_content):
                 return True
+        
+        # More sophisticated content-type-based detection
+        if response_headers and 'Content-Type' in response_headers:
+            content_type = response_headers['Content-Type'].lower()
+            
+            # If we're requesting config files but getting text/plain or application/octet-stream,
+            # it's a strong indicator of successful traversal
+            if ('text/plain' in content_type or 'application/octet-stream' in content_type):
+                # Check for signs of configuration files in non-HTML content
+                config_indicators = [
+                    # Database connection strings
+                    r"(mysql|postgresql|sqlite)://([\w.]+):(\w+)@",
+                    r"(sqlserver|mssql)://([\w.]+);",
+                    r"(conn|connection|connect).*string",
+                    r"jdbc:(mysql|postgresql|oracle|sqlserver)",
+                    
+                    # Config file patterns
+                    r"(?i)(api_?key|secret_?key|app_?secret|token|password|auth)[\s:=]+['\"]([\w-]+)['\"]",
+                    r"(?i)(username|user)[\s:=]+['\"]([\w-]+)['\"]",
+                    
+                    # INI/Config style entries
+                    r"^\[.+\]$[\r\n]+(?:([\w\d._]+)[\s:=](.*))+",  # INI section with key-value pairs
+                    
+                    # XML patterns (simplified)
+                    r"<\?xml",
+                    r"<([a-zA-Z0-9]+)>.*</\1>",
+                    
+                    # JSON patterns (simplified)
+                    r"\{[\s]*\"[^\"]+\"[\s]*:[\s]*\"[^\"]*\"",
+                    
+                    # Environment variable style
+                    r"([A-Z_]+)=(.*)"
+                ]
+                
+                for pattern in config_indicators:
+                    if re.search(pattern, response_content, re.MULTILINE):
+                        return True
+                
+                # If the file contains non-printable characters, it may be a binary file
+                if any(ord(c) < 32 and c not in '\r\n\t' for c in response_content[:1000]):
+                    # Binary file - could be a system file
+                    return True
+        
+        # Status code-based detection - some status codes are less common in normal web responses
+        if response_status and response_status in [200, 206, 403, 302, 307]:
+            # For these status codes, look more carefully at the content length and type
+            if response_headers:
+                # File downloads are often indications of successful traversal
+                if ('Content-Disposition' in response_headers and 
+                    'attachment' in response_headers['Content-Disposition'].lower()):
+                    return True
+                
+                # Unusual content types for web pages but normal for files
+                unusual_content_types = ['application/octet-stream', 'application/x-download', 
+                                        'text/plain', 'application/pdf', 'application/x-msdownload']
+                if ('Content-Type' in response_headers and 
+                    any(ctype in response_headers['Content-Type'].lower() for ctype in unusual_content_types)):
+                    return True
+        
         return False
     
-    def _check_error_responses(self, response_content):
+    def _check_error_responses(self, response_content, response_status=None):
         """
         Check if response contains error messages that might indicate a vulnerability.
+        Uses more aggressive pattern matching for real-world directory traversal indicators.
         
         Args:
             response_content (str): The response content to check
+            response_status (int, optional): The HTTP status code of the response
             
         Returns:
             bool: True if error messages were found, False otherwise
         """
+        # Expanded error patterns - looking for path disclosure in errors
         error_patterns = [
-            r"warning: include\(",
-            r"warning: require_once\(",
-            r"fatal error: include\(",
-            r"warning: file_get_contents\(",
+            # PHP errors
+            r"Warning: include\([^)]+\): failed to open stream",
+            r"Warning: include_once\([^)]+\): failed to open stream",
+            r"Warning: require_once\([^)]+\): failed to open stream",
+            r"Warning: require\([^)]+\): failed to open stream",
+            r"Warning: file_get_contents\([^)]+\): failed to open stream",
+            r"Warning: file\([^)]+\): failed to open stream",
+            r"Warning: fopen\([^)]+\): failed to open stream",
+            r"Fatal error: require_once\(\): Failed opening required",
+            r"Fatal error: require\(\): Failed opening required",
+            r"Fatal error: Uncaught Error: Failed opening required",
+            
+            # Java/.NET/Servlet errors
+            r"java\.io\.FileNotFoundException: [^\r\n]+",
+            r"Exception in thread .+ java\.io\.FileNotFoundException",
+            r"System\.IO\.FileNotFoundException",
+            r"Microsoft VBScript runtime error",
+            r"Microsoft OLE DB Provider for SQL Server error",
+            r"Error Occurred While Processing Request",
+            r"Exception Details: System\.IO\.DirectoryNotFoundException",
+            
+            # Various open source application errors
+            r"<b>Warning</b>: [^<]+open_basedir restriction in effect",
+            r"<b>Warning</b>: [^<]+failed to open stream: No such file or directory in",
+            r"<b>Warning</b>: [^<]+failed to open stream: Permission denied in",
+            
+            # General error patterns
             r"failed to open stream",
-            r"cannot find the file specified",
-            r"no such file or directory"
+            r"cannot find the (path|file) specified",
+            r"no such file or directory",
+            r"The system cannot find the (path|file) specified",
+            r"The file(.*?)does not exist",
+            r"Permission denied",
+            r"Access is denied",
+            r"Error opening file",
+            r"System.IO.FileNotFoundException",
+            r"Unable to find the specified file",
+            r"No such file",
+            r"The file(s?) (.*) was not found",
+            r"open_basedir restriction in effect"
         ]
         
+        # Check for standard error patterns
         for pattern in error_patterns:
             if re.search(pattern, response_content, re.IGNORECASE):
                 return True
+        
+        # Check for file path disclosure in error messages
+        path_disclosure_patterns = [
+            # Potential server paths in error messages or debug info
+            r"(?:\/|\\)(?:var|etc|usr|opt|home|root|srv|htdocs|www|sites|webapps)(?:\/|\\).+", 
+            r"(?:[A-Za-z]:\\)(?:Program Files|Windows|inetpub|xampp|wamp).+",
+            r"(?:[A-Za-z]:\\)(?:[\w\s.\\-]+)",  # Windows paths
+            r"(?:\/var\/www\/|\/home\/).+?\.(?:php|inc|aspx|asp|jsp|cfm|pl|cgi)",  # Unix web paths
+            r"([A-Za-z]:\\[\w\s.\\-]+\.\w+)|(/[\w\s./-]+\.\w+)"  # Any file path
+        ]
+        
+        for pattern in path_disclosure_patterns:
+            if re.search(pattern, response_content, re.IGNORECASE):
+                return True
+        
+        # Check HTTP status codes that might indicate path-related issues
+        if response_status in [403, 500, 404]:
+            # For these status codes, look for system messages that might reveal partial success
+            status_related_patterns = [
+                r"Not found",
+                r"Not [Aa]uthorized",
+                r"Access [Dd]enied",
+                r"[Ff]orbidden",
+                r"No permission"
+            ]
+            
+            for pattern in status_related_patterns:
+                if re.search(pattern, response_content, re.IGNORECASE):
+                    # If we have a 403 status, it might mean the file exists but access is denied
+                    # This is particularly interesting for directory traversal attempts
+                    if response_status == 403:
+                        return True
+        
         return False
     
     def scan(self):
@@ -314,7 +447,8 @@ class DirectoryTraversalScanner:
                     continue
                 
                 # Check for successful traversal or error messages that indicate vulnerability
-                if self._is_traversal_successful(response.text) or self._check_error_responses(response.text):
+                if (self._is_traversal_successful(response.text, response.status_code, response.headers) or 
+                    self._check_error_responses(response.text, response.status_code)):
                     detail = f"Directory traversal possible with payload: {payload}"
                     
                     # Check if this is a parameter-based traversal

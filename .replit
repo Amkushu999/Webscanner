@@ -31,6 +31,18 @@ args = "SSL/TLS Demo"
 task = "workflow.run"
 args = "Full Scan Demo"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Standalone Test"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Standalone Demo"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Standalone SSL Test"
+
 [[workflows.workflow]]
 name = "WebScan Runner"
 author = "agent"
@@ -99,7 +111,49 @@ task = "packager.installForAll"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "python webscan.py https://example.com --scan-type all -v"
+args = "python webscan_standalone.py https://example.com --scan-type all -v"
+
+[[workflows.workflow]]
+name = "Standalone Test"
+author = "agent"
+
+[workflows.workflow.metadata]
+agentRequireRestartOnSave = false
+
+[[workflows.workflow.tasks]]
+task = "packager.installForAll"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python webscan_standalone.py --help"
+
+[[workflows.workflow]]
+name = "Standalone Demo"
+author = "agent"
+
+[workflows.workflow.metadata]
+agentRequireRestartOnSave = false
+
+[[workflows.workflow.tasks]]
+task = "packager.installForAll"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python webscan_standalone.py https://example.com --scan-type headers -v"
+
+[[workflows.workflow]]
+name = "Standalone SSL Test"
+author = "agent"
+
+[workflows.workflow.metadata]
+agentRequireRestartOnSave = false
+
+[[workflows.workflow.tasks]]
+task = "packager.installForAll"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python webscan_standalone.py https://example.com --scan-type ssl -v"
 
 [deployment]
 run = ["sh", "-c", "python webscan.py -h"]

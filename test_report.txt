@@ -1,0 +1,105 @@
+================================================================================
+WebScan Vulnerability Report
+Developed by AMKUSH
+================================================================================
+
+SCAN INFORMATION
+--------------------------------------------------------------------------------
+Target URL: https://example.com
+Scan Types: headers, info
+Start Time: 2025-04-07 21:27:14
+Duration: 0.60 seconds
+Vulnerabilities Found: 11
+
+VULNERABILITY SUMMARY
+--------------------------------------------------------------------------------
+Medium: 5
+Low: 4
+Info: 2
+
+DETAILED FINDINGS
+================================================================================
+
+Missing Security Header
+-----------------------
+Severity: Medium
+URL: https://example.com
+Details: HTTP Strict Transport Security (HSTS) forces secure connections to the server
+Header: Strict-Transport-Security
+Recommendation: Add "Strict-Transport-Security: max-age=31536000; includeSubDomains" header
+
+----------------------------------------
+Severity: Medium
+URL: https://example.com
+Details: Content Security Policy prevents XSS and data injection attacks
+Header: Content-Security-Policy
+Recommendation: Implement a Content Security Policy that restricts resource loading
+
+----------------------------------------
+Severity: Medium
+URL: https://example.com
+Details: Prevents MIME-sniffing a response away from the declared content-type
+Header: X-Content-Type-Options
+Recommendation: Add "X-Content-Type-Options: nosniff" header
+
+----------------------------------------
+Severity: Medium
+URL: https://example.com
+Details: Protects website against clickjacking attacks
+Header: X-Frame-Options
+Recommendation: Add "X-Frame-Options: DENY" or "X-Frame-Options: SAMEORIGIN" header
+
+----------------------------------------
+Severity: Low
+URL: https://example.com
+Details: Enables XSS filtering in browser (deprecated in modern browsers in favor of CSP)
+Header: X-XSS-Protection
+Recommendation: Add "X-XSS-Protection: 1; mode=block" header
+
+----------------------------------------
+Severity: Low
+URL: https://example.com
+Details: Controls how much referrer information is included with requests
+Header: Referrer-Policy
+Recommendation: Add appropriate Referrer-Policy header like "strict-origin-when-cross-origin"
+
+----------------------------------------
+Severity: Low
+URL: https://example.com
+Details: Controls which browser features can be used (now renamed to Permissions-Policy)
+Header: Feature-Policy
+Recommendation: Implement Feature-Policy or Permissions-Policy to restrict browser features
+
+----------------------------------------
+Severity: Low
+URL: https://example.com
+Details: Controls which browser features and APIs can be used
+Header: Permissions-Policy
+Recommendation: Implement Permissions-Policy to restrict browser features
+
+----------------------------------------
+Severity: Info
+URL: https://example.com
+Details: HPKP pins a site to specific certificate keys (considered high risk, deprecated)
+Header: Public-Key-Pins
+Recommendation: Consider using Certificate Transparency instead of HPKP
+
+----------------------------------------
+Severity: Info
+URL: https://example.com
+Details: Clears browser data (cookies, storage, cache) for the website
+Header: Clear-Site-Data
+Recommendation: Use Clear-Site-Data header on logout pages
+
+
+Information Disclosure
+----------------------
+Severity: Medium
+URL: https://example.com
+Details: Found File Path: /html, /css, /domains/example
+Recommendation: Remove file path from the page source
+
+
+================================================================================
+Report generated at: 2025-04-07 21:27:14
+================================================================================

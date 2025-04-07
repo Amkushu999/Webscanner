@@ -45,6 +45,7 @@ def print_banner():
 ║                                                                  ║
 ║  {Fore.GREEN}Advanced Website Vulnerability Scanner                        {Fore.CYAN}║
 ║  {Fore.YELLOW}Version 1.0.0                                                 {Fore.CYAN}║
+║  {Fore.MAGENTA}Developed by AMKUSH                                           {Fore.CYAN}║
 ╚══════════════════════════════════════════════════════════════════╝
     """
     print(banner)

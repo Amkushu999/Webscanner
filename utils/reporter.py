@@ -22,7 +22,8 @@ class Reporter:
         self.vulnerabilities = []
         self.target_url = None
         self.scan_types = []
-        self.start_time = None
+        # Initialize start_time with current datetime to avoid None references
+        self.start_time = datetime.now()
     
     def start_report(self, target_url, scan_types):
         """
@@ -34,6 +35,7 @@ class Reporter:
         """
         self.target_url = target_url
         self.scan_types = scan_types
+        # Reset the start time to the actual start of the scan
         self.start_time = datetime.now()
     
     def add_vulnerabilities(self, vulnerabilities):
@@ -55,11 +57,16 @@ class Reporter:
         Returns:
             str: Path to the generated report file
         """
+        # Ensure start_time is valid before formatting
+        start_time_str = 'N/A'
+        if self.start_time:
+            start_time_str = self.start_time.strftime('%Y-%m-%d %H:%M:%S')
+        
         report_data = {
             'scan_info': {
                 'target_url': self.target_url,
                 'scan_types': self.scan_types,
-                'start_time': self.start_time.strftime('%Y-%m-%d %H:%M:%S'),
+                'start_time': start_time_str,
                 'duration': f"{duration:.2f} seconds",
                 'vulnerabilities_found': len(self.vulnerabilities)
             },
@@ -107,6 +114,7 @@ class Reporter:
                 # Header
                 f.write("=" * 80 + "\n")
                 f.write(f"WebScan Vulnerability Report\n")
+                f.write(f"Developed by AMKUSH\n")
                 f.write("=" * 80 + "\n\n")
                 
                 # Scan Information

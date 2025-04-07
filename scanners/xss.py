@@ -371,6 +371,7 @@ class XSSScanner:
     def _is_xss_successful(self, response_content, payload):
         """
         Check if XSS payload was successfully injected using multiple detection methods.
+        Uses aggressive real-world techniques to determine if the payload would execute.
         
         Args:
             response_content (str): The response content to check
@@ -388,52 +389,127 @@ class XSSScanner:
         html_encoded = payload.replace("<", "&lt;").replace(">", "&gt;")
         if html_encoded in response_content:
             # If we find the HTML-encoded version, it's likely not executable XSS
+            # However, we should check if it's inside an attribute value that could still be exploitable
+            soup = BeautifulSoup(response_content, 'html.parser')
+            for tag in soup.find_all():
+                for attr, value in tag.attrs.items():
+                    if isinstance(value, str) and html_encoded in value:
+                        # If the encoded payload is in a JavaScript event handler, it might still be exploitable
+                        if attr.lower().startswith('on'):
+                            return True
+                        # If inside JavaScript block, might be decodable
+                        if attr.lower() in ['src', 'href'] and 'javascript:' in value.lower():
+                            return True
             return False
         
         # Check for URL-encoded versions (this might be reflected but not be executable)
         from urllib.parse import quote
         url_encoded = quote(payload)
         if url_encoded in response_content and not payload in response_content:
+            # Check if it's in a context where decoding happens automatically
+            soup = BeautifulSoup(response_content, 'html.parser')
+            # Check script tags where URL decoding might happen during execution
+            for script in soup.find_all('script'):
+                if url_encoded in script.text:
+                    script_text = script.text.lower()
+                    if 'decode' in script_text or 'unescape' in script_text or 'fromcharcode' in script_text:
+                        return True
             return False
             
         # Advanced check for script injections
         if "<script" in payload.lower():
             # Look for script tags with our payload content
-            script_content = payload.split("<script")[1].split(">")[1].split("</script")[0].strip()
-            if script_content:
-                soup = BeautifulSoup(response_content, 'html.parser')
-                for script in soup.find_all('script'):
-                    if script_content in script.text:
-                        return True
-        
-        # Check for event handlers in attributes
-        if "on" in payload.lower() and "=" in payload:
-            # Extract the event handler
-            event_handler_match = re.search(r'on\w+\s*=\s*["\']([^"\']+)["\']', payload, re.IGNORECASE)
-            if event_handler_match:
-                event_content = event_handler_match.group(1)
-                # Search for this content in any attribute
-                soup = BeautifulSoup(response_content, 'html.parser')
-                for tag in soup.find_all():
-                    for attr, value in tag.attrs.items():
-                        if attr.lower().startswith('on') and event_content in value:
+            try:
+                script_content = payload.split("<script")[1].split(">")[1].split("</script")[0].strip()
+                if script_content:
+                    soup = BeautifulSoup(response_content, 'html.parser')
+                    for script in soup.find_all('script'):
+                        if script_content in script.text:
                             return True
+            except:
+                pass  # Malformed payload or parsing error
         
-        # Check for javascript: scheme injections 
+        # Check for event handlers in attributes - thorough real-world check
+        if "on" in payload.lower():
+            # Extract the event handler (handling quotes that may be omitted in HTML)
+            event_handler_matches = re.findall(r'on\w+\s*=\s*(?:["\']([^"\']+)["\']|([^\s>]+))', payload, re.IGNORECASE)
+            if event_handler_matches:
+                for match_group in event_handler_matches:
+                    for match in match_group:
+                        if not match:
+                            continue
+                        # Search for this content in any attribute - very aggressive check
+                        soup = BeautifulSoup(response_content, 'html.parser')
+                        for tag in soup.find_all():
+                            for attr, value in tag.attrs.items():
+                                if attr.lower().startswith('on') and match in value:
+                                    return True
+                            # Check if our event was injected as a new attribute
+                            html_tag = str(tag)
+                            for on_attr in re.findall(r'on\w+\s*=\s*(?:["\'][^"\']*["\']|[^\s>]+)', html_tag, re.IGNORECASE):
+                                if match in on_attr:
+                                    return True
+        
+        # Check for javascript: scheme injections - aggressive test
         if "javascript:" in payload.lower():
             js_content = payload.split("javascript:")[1].strip()
             soup = BeautifulSoup(response_content, 'html.parser')
-            for tag in soup.find_all(['a', 'iframe', 'frame', 'embed', 'object']):
-                if tag.has_attr('src') and "javascript:" in tag['src'].lower() and js_content in tag['src']:
+            # Check href attributes
+            for tag in soup.find_all(['a', 'iframe', 'frame', 'embed', 'object', 'area']):
+                for attr in ['href', 'src', 'data']:
+                    if tag.has_attr(attr) and 'javascript:' in tag[attr].lower() and js_content in tag[attr]:
+                        return True
+            
+            # Check style attributes for expression(javascript:...)
+            for tag in soup.find_all(style=True):
+                style_value = tag['style'].lower()
+                if 'expression' in style_value and 'javascript:' in style_value and js_content in style_value:
                     return True
-                if tag.has_attr('href') and "javascript:" in tag['href'].lower() and js_content in tag['href']:
+                    
+            # Check inline styles
+            for style in soup.find_all('style'):
+                if 'expression' in style.text.lower() and 'javascript:' in style.text.lower() and js_content in style.text:
                     return True
+        
+        # Check for DOM-based XSS vectors - looking for data passed to risky functions
+        soup = BeautifulSoup(response_content, 'html.parser')
+        for script in soup.find_all('script'):
+            script_text = script.text.lower()
+            
+            # Look for dangerous DOM manipulation functions
+            dangerous_sinks = [
+                "document.write", "innerHTML", "outerHTML", "insertAdjacentHTML",
+                "eval(", "setTimeout(", "setInterval(", "Function(", "document.location",
+                "window.name", "document.URL", "location.hash", "location.search"
+            ]
+            
+            for sink in dangerous_sinks:
+                if sink in script_text:
+                    # Check if user input is passed to these dangerous functions
+                    potential_sources = ["location", "document.URL", "document.documentURI", 
+                                        "document.URLUnencoded", "document.baseURI", "document.referrer"]
+                    
+                    for source in potential_sources:
+                        if source in script_text:
+                            # This is a high-probability real-world DOM XSS scenario
+                            return True
+                            
+        # Check for alternative injectable contexts like SVG elements
+        for svg_tag in soup.find_all('svg'):
+            for tag in svg_tag.find_all():
+                # Check for SVG animation events (aggressive real-world test)
+                if tag.name in ['animate', 'set', 'animatetransform', 'animatemotion']:
+                    for attr in ['attributeName', 'begin', 'end', 'onbegin', 'onend']:
+                        if tag.has_attr(attr) and any(trigger in tag[attr].lower() for trigger in ['script', 'alert', 'confirm', 'prompt']):
+                            return True
         
         return False
     
     def _can_escape_context(self, response_content, payload):
         """
         Check if payload can escape the current context.
+        Uses aggressive real-world techniques to determine successful XSS injection.
+        Advanced context analysis ensures real-world vulnerability detection.
         
         Args:
             response_content (str): The response content to check
@@ -442,26 +518,183 @@ class XSSScanner:
         Returns:
             bool: True if payload can escape context, False otherwise
         """
-        # Look for payload in dangerous contexts (simplified)
+        # Convert response to soup
         soup = BeautifulSoup(response_content, 'html.parser')
         
-        # Check if payload is in script tag
+        # Check if payload is in script tag - this is an immediate win for XSS
         for script in soup.find_all('script'):
             if payload in script.text:
-                return True
+                # Check if the payload is actually part of a string literal
+                # If it's not properly escaped inside JavaScript, it's definitely vulnerable
+                script_content = script.text
+                if '"' + payload + '"' not in script_content and "'" + payload + "'" not in script_content:
+                    # The payload is not enclosed in quotes, suggesting it's part of the code
+                    return True
+                else:
+                    # Even if enclosed in quotes, check if quotes can be escaped
+                    if any(x in payload for x in ['"', "'"]) and any(x in script_content for x in [payload.replace('"', '\\"'), payload.replace("'", "\\'")]):
+                        return False  # Payload is properly escaped
+                    return True  # Potentially exploitable
+            
+        # Enhanced detection for DOM XSS in JavaScript code
+        # Look for payload being passed to dangerous DOM manipulation functions
+        for script in soup.find_all('script'):
+            script_content = script.text.lower()
+            dangerous_dom_funcs = [
+                'document.write', 'innerHTML', 'outerHTML', 'insertAdjacentHTML',
+                'eval(', 'setTimeout(', 'setInterval(', 'new Function(', 
+                'document.createElement', 'document.location', 'location.href', 
+                'location.hash', 'location.search', 'document.URL'
+            ]
+            
+            # Check if the script uses both the payload (or parts of it) and dangerous functions
+            for func in dangerous_dom_funcs:
+                # Extract the core of the payload (e.g., 'alert(...)' from different variations)
+                core_payload = self._extract_core_payload(payload)
+                if func in script_content and core_payload and core_payload in script_content:
+                    return True
         
-        # Check if payload is in attribute values
+        # Check if payload is in attribute values, with more context-awareness
         for tag in soup.find_all():
             for attr, value in tag.attrs.items():
                 if isinstance(value, str) and payload in value:
+                    # Special checks for different attribute types - more aggressive testing
+                    # Event handler attributes (onclick, onmouseover, etc.)
+                    if attr.lower().startswith('on'):
+                        return True
+                    
+                    # Script-supporting attributes
+                    if attr.lower() in ['href', 'src', 'action', 'formaction'] and any(
+                        scheme in value.lower() for scheme in ['javascript:', 'data:', 'vbscript:']
+                    ):
+                        return True
+                    
+                    # Style attributes that can contain JavaScript
+                    if attr.lower() == 'style' and any(
+                        risk in value.lower() for risk in ['expression', 'url(', '@import']
+                    ):
+                        return True
+                    
+                    # Check for injected attributes that break out of their context
+                    tag_str = str(tag)
+                    attr_pattern = f'{attr}\\s*=\\s*["\'][^"\']*{re.escape(payload)}[^"\']*["\']'
+                    if not re.search(attr_pattern, tag_str, re.IGNORECASE):
+                        # The payload might have broken out of the attribute's quotes
+                        return True
+        
+        # More aggressive HTML context checks
+        # 1. Check if the payload is not fully contained within a tag's text content
+        try:
+            payload_segments = re.split(r'<[^>]+>', response_content)
+            for segment in payload_segments:
+                if payload in segment:
+                    # The payload is in the content between tags, potential XSS
+                    break
+            else:
+                # If we didn't break out of the loop, payload might be split across tags or attributes
+                html_content = str(soup)
+                payload_pos = html_content.find(payload)
+                if payload_pos != -1:
+                    # Check the surrounding context - getting 10 chars before and after
+                    start = max(0, payload_pos - 10)
+                    end = min(len(html_content), payload_pos + len(payload) + 10)
+                    context = html_content[start:end]
+                    
+                    # If the context contains tag boundaries, the payload might be breaking out
+                    if '<' in context or '>' in context:
+                        return True
+        except:
+            # If any error occurs during this complex check, err on the side of caution
+            pass
+            
+        # 2. Check for payload in dangerous CSS contexts
+        for style in soup.find_all('style'):
+            if payload in style.text:
+                # Check if it's in a context where it can execute - CSS expressions, imports
+                if any(risk in style.text.lower() for risk in ['expression', '@import', 'url(']):
                     return True
         
-        # Check if payload is directly in HTML
-        if re.search(re.escape(payload), str(soup), re.IGNORECASE):
-            return True
+        # 3. Check for content that's directly in the HTML (not in a specific attribute)
+        # This is more aggressive than the simple regex check
+        raw_html = str(soup)
+        if payload in raw_html:
+            # Check if the payload is not inside a tag's attribute
+            # This is a simplified heuristic but effective for most cases
+            payload_pos = raw_html.find(payload)
+            if payload_pos > 0:
+                # Look for character before the payload
+                prev_char = raw_html[payload_pos-1]
+                # Look for character after the payload
+                next_char_pos = payload_pos + len(payload)
+                next_char = raw_html[next_char_pos] if next_char_pos < len(raw_html) else ''
+                
+                # If payload is not wrapped in quotes, it's likely not in an attribute
+                if prev_char not in ['"', "'"] and next_char not in ['"', "'"]:
+                    # Check if we're not inside a comment
+                    before_payload = raw_html[:payload_pos]
+                    if before_payload.rfind('<!--') == -1 or before_payload.rfind('-->') > before_payload.rfind('<!--'):
+                        return True
+        
+        # 4. Look for the payload in fragments that might be parsed as script
+        if any(fragment in payload.lower() for fragment in ['<script', 'javascript:', 'eval(', 'alert(']):
+            # Extract all text nodes
+            for text in [t for t in soup.find_all(text=True) if t.parent.name not in ['script', 'style']]:
+                if payload in text:
+                    # If the payload contains script tags or JS code and it's in a text node,
+                    # it's likely to be executed
+                    return True
         
         return False
     
+    def _extract_core_payload(self, payload):
+        """
+        Extract the core of a payload (e.g., alert(...) from different XSS variations).
+        This helps in detecting DOM XSS where parts of the payload might be used.
+        
+        Args:
+            payload (str): The XSS payload to analyze
+            
+        Returns:
+            str: The core part of the payload, or None if not found
+        """
+        # Common patterns to look for in XSS payloads
+        core_patterns = [
+            r'alert\s*\([^)]*\)',  # alert(...)
+            r'confirm\s*\([^)]*\)',  # confirm(...)
+            r'prompt\s*\([^)]*\)',  # prompt(...)
+            r'console\.\w+\s*\([^)]*\)',  # console.log(...), etc.
+            r'document\.write\s*\([^)]*\)',  # document.write(...)
+            r'eval\s*\([^)]*\)',  # eval(...)
+            r'setTimeout\s*\([^)]*\)',  # setTimeout(...)
+            r'setInterval\s*\([^)]*\)',  # setInterval(...)
+            r'location\s*=',  # location=...
+            r'location\.\w+\s*=',  # location.href=..., etc.
+            r'\.innerHTML\s*=',  # element.innerHTML=...
+            r'\.outerHTML\s*=',  # element.outerHTML=...
+            r'String\.fromCharCode\s*\([^)]*\)'  # String.fromCharCode(...)
+        ]
+        
+        for pattern in core_patterns:
+            match = re.search(pattern, payload, re.IGNORECASE)
+            if match:
+                return match.group(0)
+                
+        # If no core pattern found, try to extract the content between script tags
+        script_match = re.search(r'<script[^>]*>(.*?)</script>', payload, re.IGNORECASE | re.DOTALL)
+        if script_match:
+            return script_match.group(1).strip()
+            
+        # Check for SVG animation exploits - another advanced vector
+        svg_match = re.search(r'<svg[^>]*>.*?</svg>', payload, re.IGNORECASE | re.DOTALL)
+        if svg_match:
+            return svg_match.group(0)
+            
+        # For simpler payloads without recognizable patterns
+        if 'XSS' in payload:
+            return 'XSS'
+            
+        return None
+        
     def scan(self):
         """
         Start the XSS vulnerability scan.
