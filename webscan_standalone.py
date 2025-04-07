@@ -3,7 +3,23 @@
 WebScan - Advanced Website Vulnerability Scanner (Standalone Version)
 
 A comprehensive command-line tool for detecting various web vulnerabilities,
-with multi-threaded scanning capabilities and detailed reporting.
+with multi-threaded scanning capabilities, detailed reporting, and aggressive
+real-world vulnerability detection techniques.
+
+Features:
+- Multi-threaded scanning engine for efficient analysis
+- Comprehensive vulnerability detection including SQL injection, XSS, SSL/TLS vulnerabilities,
+  directory traversal, sensitive file disclosure, and more
+- Advanced detection algorithms using real-world exploitation techniques
+- Aggressive time-based SQL injection detection with database-specific payloads
+- Context-aware XSS detection that analyzes DOM structure for true execution potential
+- SSL/TLS vulnerability detection with cipher strength and protocol verification
+- Detailed reporting with risk assessment and recommended mitigations
+- Rate limiting to avoid triggering WAFs and IDS/IPS systems
+- Support for scanning through proxies for anonymity
+- Progress tracking with visual progress bars
+- Extensive customization options
+- Interactive mode for easier usage and real-time feedback
 
 This is a single-file version of WebScan, with all module code combined.
 Developed by AMKUSH
@@ -95,6 +111,16 @@ class ScanArgs:
         self.json = False                  # Output results as JSON
         self.target_list = ''              # File with list of targets
         self.resume = ''                   # Resume from state file
+        
+        # Enhanced features
+        self.proxy = None                  # Proxy URL (e.g., http://127.0.0.1:8080)
+        self.proxy_auth = None             # Proxy authentication (username:password)
+        self.rate_limit = 0                # Requests per second (0 = no limit)
+        self.random_delay = False          # Add random delay between requests
+        self.delay_min = 0.5               # Minimum delay in seconds
+        self.delay_max = 2.0               # Maximum delay in seconds
+        self.rotate_user_agents = False    # Rotate through different user agents
+        self.cookies = None                # Custom cookies for requests
 DEFAULT_TIMEOUT = 10
 SCAN_RESUME_DATA = {}
 PROGRESS_LOCK = threading.Lock()
@@ -370,6 +396,122 @@ def signal_handler(sig, frame):
     SCAN_INTERRUPTED = True
     # Let the main function handle the cleanup
     return
+
+
+# Rate limiting and request throttling functionality
+class RequestThrottler:
+    """Class for throttling HTTP requests to avoid WAF detection and server overload."""
+    
+    def __init__(self, rate_limit=0, random_delay=False, delay_min=0.5, delay_max=2.0, logger=None):
+        """
+        Initialize the request throttler.
+        
+        Args:
+            rate_limit (float): Maximum requests per second (0 = no limit)
+            random_delay (bool): Whether to add random delays between requests
+            delay_min (float): Minimum delay in seconds (if random_delay=True)
+            delay_max (float): Maximum delay in seconds (if random_delay=True)
+            logger: Optional logger instance
+        """
+        self.rate_limit = rate_limit
+        self.random_delay = random_delay
+        self.delay_min = delay_min
+        self.delay_max = delay_max
+        self.logger = logger
+        self.last_request_time = 0
+        self.lock = threading.Lock()
+        
+    def wait(self):
+        """
+        Wait the appropriate amount of time between requests based on settings.
+        This ensures we don't exceed the rate limit and optionally adds randomization.
+        """
+        with self.lock:
+            current_time = time.time()
+            
+            # Apply rate limiting if configured
+            if self.rate_limit > 0:
+                # Calculate minimum time between requests
+                min_interval = 1.0 / self.rate_limit
+                
+                # Calculate time since last request
+                elapsed = current_time - self.last_request_time
+                
+                # If we need to wait to respect the rate limit
+                if elapsed < min_interval:
+                    wait_time = min_interval - elapsed
+                    if self.logger and wait_time > 0.1:  # Only log significant waits
+                        self.logger.debug(f"Rate limiting: waiting {wait_time:.2f}s to maintain {self.rate_limit} req/sec")
+                    time.sleep(wait_time)
+            
+            # Apply random delay if configured (useful for avoiding pattern detection)
+            if self.random_delay:
+                random_wait = random.uniform(self.delay_min, self.delay_max)
+                if self.logger:
+                    self.logger.debug(f"Adding random delay: {random_wait:.2f}s")
+                time.sleep(random_wait)
+            
+            # Update the last request time
+            self.last_request_time = time.time()
+
+
+# Function to create requests session with proxy configuration
+def create_request_session(proxy=None, proxy_auth=None, custom_headers=None, cookies=None, verify_ssl=True):
+    """
+    Create and configure a requests session with optional proxy and other settings.
+    
+    Args:
+        proxy (str): Proxy URL (e.g., "http://127.0.0.1:8080")
+        proxy_auth (str): Proxy authentication in format "username:password"
+        custom_headers (dict): Custom HTTP headers to add to all requests
+        cookies (dict or str): Cookies to add to the session
+        verify_ssl (bool): Whether to verify SSL certificates
+    
+    Returns:
+        requests.Session: Configured session object
+    """
+    session = requests.Session()
+    
+    # Configure proxy if provided
+    if proxy:
+        proxies = {
+            "http": proxy,
+            "https": proxy
+        }
+        session.proxies.update(proxies)
+        
+        # Add proxy authentication if provided
+        if proxy_auth:
+            try:
+                username, password = proxy_auth.split(":")
+                session.auth = (username, password)
+            except ValueError:
+                print(f"{Fore.YELLOW}[WARNING] Invalid proxy authentication format. Use 'username:password'")
+    
+    # Set custom headers
+    if custom_headers:
+        session.headers.update(custom_headers)
+    
+    # Add cookies if provided
+    if cookies:
+        if isinstance(cookies, str):
+            # Parse cookie string
+            try:
+                cookie_dict = {}
+                for item in cookies.split(';'):
+                    if '=' in item:
+                        key, value = item.strip().split('=', 1)
+                        cookie_dict[key] = value
+                session.cookies.update(cookie_dict)
+            except Exception as e:
+                print(f"{Fore.YELLOW}[WARNING] Error parsing cookie string: {str(e)}")
+        elif isinstance(cookies, dict):
+            session.cookies.update(cookies)
+    
+    # Set SSL verification
+    session.verify = verify_ssl
+    
+    return session
 
 
 def calculate_risk_score(vulnerability):
@@ -1237,7 +1379,7 @@ class SQLInjectionScanner:
         """
         Advanced detection for time-based blind SQL injection vulnerabilities.
         This method attempts multiple sophisticated payloads and analyzes response times
-        to identify potential blind SQL injection points.
+        to identify potential blind SQL injection points using real-world exploitation techniques.
         
         Args:
             url_or_form (str): The URL to test or form action URL
@@ -1249,8 +1391,12 @@ class SQLInjectionScanner:
             tuple: (is_vulnerable, payload, time_diff) or (False, None, 0) if not vulnerable
         """
         # Comprehensive database-specific time-based payloads for aggressive real-world detection
+        # These payloads are designed to trigger measurable delays in database processing
+        # and are specific to different database engines for maximum detection accuracy
+        
+        # Use shorter delays (2s) to reduce scan time while maintaining detection accuracy
         time_payloads = [
-            # MySQL time-based payloads (using brief delays for faster scanning)
+            # MySQL time-based payloads with various contexts and quote escaping
             "1' AND (SELECT * FROM (SELECT(SLEEP(2)))a)-- -",
             "' AND (SELECT * FROM (SELECT(SLEEP(2)))a)-- -",
             "\" AND (SELECT * FROM (SELECT(SLEEP(2)))a)-- -",
@@ -1263,11 +1409,15 @@ class SQLInjectionScanner:
             ") AND SLEEP(2)-- -",
             "1 AND SLEEP(2)#",
             "AND SLEEP(2)#",
-            "1' AND BENCHMARK(5000000,MD5(NOW()))-- -",
-            "' AND BENCHMARK(5000000,MD5(NOW()))-- -",
+            "1' OR SLEEP(2)-- -",  # OR-based injection that executes in all rows
+            "1' AND IF((SELECT user()) LIKE 'root%', SLEEP(2), 0)-- -",  # Conditional with data exfiltration
+            "1' AND (SELECT SLEEP(2) FROM DUAL WHERE DATABASE() LIKE 'a%')-- -",  # Conditional on DB name
+            "1' AND BENCHMARK(10000000,MD5(NOW()))-- -",  # CPU-intensive alternative to SLEEP
+            "' AND BENCHMARK(10000000,MD5(NOW()))-- -",
+            "1' UNION SELECT SLEEP(2),NULL,NULL,NULL-- -",  # UNION-based time delay
             
-            # PostgreSQL time-based payloads
-            "1'; SELECT CASE WHEN (1=1) THEN pg_sleep(2) ELSE pg_sleep(0) END-- -",
+            # PostgreSQL time-based payloads with conditional logic
+            "1'; SELECT CASE WHEN (SELECT current_user) LIKE 'pos%' THEN pg_sleep(2) ELSE pg_sleep(0) END-- -",
             "'; SELECT CASE WHEN (1=1) THEN pg_sleep(2) ELSE pg_sleep(0) END-- -",
             "\"; SELECT CASE WHEN (1=1) THEN pg_sleep(2) ELSE pg_sleep(0) END-- -",
             "1;SELECT pg_sleep(2)-- -",
@@ -1275,8 +1425,10 @@ class SQLInjectionScanner:
             "1'); SELECT pg_sleep(2)-- -",
             "'); SELECT pg_sleep(2)-- -",
             "1)); SELECT pg_sleep(2)-- -",
+            "1' OR 1=(SELECT 1 FROM pg_sleep(2))-- -",
+            "' UNION SELECT NULL,pg_sleep(2),NULL,NULL-- -",  # UNION with pg_sleep
             
-            # SQL Server time-based payloads
+            # SQL Server time-based payloads with database-specific functions
             "1'; WAITFOR DELAY '0:0:2'-- -",
             "'; WAITFOR DELAY '0:0:2'-- -",
             "\"; WAITFOR DELAY '0:0:2'-- -",
@@ -1286,40 +1438,48 @@ class SQLInjectionScanner:
             ")); WAITFOR DELAY '0:0:2'-- -",
             "1; WAITFOR DELAY '0:0:2'-- -",
             "; WAITFOR DELAY '0:0:2'-- -",
+            "' UNION SELECT NULL,NULL,(WAITFOR DELAY '0:0:2'),NULL-- -",  # UNION with WAITFOR
+            "1' OR 1=(SELECT 1 FROM sysusers WHERE SUBSTRING(name,1,1)='d' WAITFOR DELAY '0:0:2')-- -",  # Data exfil
             
-            # Oracle time-based payloads
+            # Oracle time-based payloads with heavy queries and built-in functions
             "1' AND 1=(SELECT COUNT(*) FROM ALL_USERS T1, ALL_USERS T2, ALL_USERS T3)-- -",
             "' AND 1=(SELECT COUNT(*) FROM ALL_USERS T1, ALL_USERS T2, ALL_USERS T3)-- -",
             "1' AND 1=(SELECT COUNT(*) FROM ALL_USERS T1, ALL_USERS T2)-- -",
             "' AND 1=(SELECT COUNT(*) FROM ALL_USERS T1, ALL_USERS T2)-- -",
             "1' AND DBMS_PIPE.RECEIVE_MESSAGE(('A'),2) IS NULL-- -",
             "' AND DBMS_PIPE.RECEIVE_MESSAGE(('A'),2) IS NULL-- -",
+            "1' AND UTL_INADDR.GET_HOST_NAME((SELECT user FROM DUAL)) IS NULL-- -",  # DNS-based exfiltration
+            "' UNION SELECT NULL,DBMS_PIPE.RECEIVE_MESSAGE(('A'),2),NULL FROM DUAL-- -",  # UNION with delay
             
-            # SQLite time-based payloads
+            # SQLite time-based payloads with resource-intensive operations
             "1' AND 1=like('ABCDEFG',repeat('ABCDEFG',3000000))-- -",
             "' AND 1=like('ABCDEFG',repeat('ABCDEFG',3000000))-- -",
             "1' AND randomblob(100000000) AND '1'='1",
             "' AND randomblob(100000000) AND '1'='1",
+            "1' AND LOWER(hex(randomblob(1000000)))-- -",  # CPU-intensive operation
+            "' UNION SELECT LOWER(hex(randomblob(1000000)))-- -",  # UNION with CPU-intensive op
             
             # Nested queries with conditional logic (works across multiple DBMS)
+            "1' AND (SELECT CASE WHEN (1=1) THEN (SELECT SLEEP(2)) ELSE 1 END)-- -",
+            "' AND (SELECT CASE WHEN (1=1) THEN (SELECT SLEEP(2)) ELSE 1 END)-- -",
             "1' AND IF(1=1, SLEEP(2), 0)-- -",
             "' AND IF(1=1, SLEEP(2), 0)-- -",
             "1'; IF(1=1) WAITFOR DELAY '0:0:2'-- -",
             "'; IF(1=1) WAITFOR DELAY '0:0:2'-- -",
-            "1' AND (SELECT CASE WHEN (1=1) THEN (SELECT SLEEP(2)) ELSE 1 END)-- -",
-            "' AND (SELECT CASE WHEN (1=1) THEN (SELECT SLEEP(2)) ELSE 1 END)-- -",
             
             # Advanced stacked queries (works if stacked queries are allowed)
             "1'; SELECT SLEEP(2)-- -",
             "'; SELECT SLEEP(2)-- -",
             "1\"; SELECT SLEEP(2)-- -",
             "\"; SELECT SLEEP(2)-- -",
+            "1; SELECT pg_sleep(2)-- -",
             
-            # Context-specific time-based payloads
+            # Context-specific time-based payloads optimized for different SQL contexts
             "1' OR (SELECT 1 FROM (SELECT SLEEP(2))A)-- -",  # WHERE clauses
             "1 OR (SELECT 1 FROM (SELECT SLEEP(2))A)",       # Numeric contexts
             "' UNION SELECT IF(1=1,SLEEP(2),0)-- -",         # UNION queries
-            "1' OR IF(1=1,SLEEP(2),0)-- -"                   # OR conditions
+            "1' OR IF(1=1,SLEEP(2),0)-- -",                  # OR conditions
+            "1' AND EXISTS(SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE table_schema=DATABASE() AND table_name LIKE '%' AND SLEEP(2))-- -"  # EXISTS subquery
         ]
         
         is_form = form_details is not None and input_field is not None
@@ -4026,7 +4186,7 @@ class HTTPHeaderScanner:
 ###########################################
 
 class SSLTLSScanner:
-    """Scanner for SSL/TLS vulnerabilities."""
+    """Scanner for SSL/TLS vulnerabilities with enhanced detection capabilities."""
     
     def __init__(self, target_url, timeout=10, depth=2, user_agent="WebScan/1.0.0", logger=None, verbose=False):
         """
@@ -4044,6 +4204,7 @@ class SSLTLSScanner:
         self.timeout = timeout
         self.logger = logger
         self.verbose = verbose
+        self.headers = {'User-Agent': user_agent}
         
         # Parse the URL to get the hostname and port
         parsed_url = urlparse(target_url)
@@ -4058,28 +4219,38 @@ class SSLTLSScanner:
         # Map of vulnerable SSL/TLS protocol versions
         # Modern Python versions have removed SSLv2 and SSLv3 protocol constants
         # Using a dictionary with protocol names as keys instead of protocol constants
-        # Use modern approach to handle deprecated protocol constants
         self.vulnerable_protocols = {
+            'SSLv2': {
+                'name': 'SSLv2',
+                'protocol': 'SSLv2',
+                'severity': 'Critical',
+                'description': 'SSLv2 is fundamentally broken and deprecated for over 20 years - DROWN Attack vulnerable',
+                'recommendation': 'Disable SSLv2 on the server immediately',
+                'cve': 'CVE-2016-0800'
+            },
             'SSLv3': {
                 'name': 'SSLv3',
                 'protocol': 'SSLv3',
                 'severity': 'Critical',
-                'description': 'SSLv3 is vulnerable to POODLE attack',
-                'recommendation': 'Disable SSLv3 on the server'
+                'description': 'SSLv3 is vulnerable to POODLE attack which allows decryption of secure communications',
+                'recommendation': 'Disable SSLv3 on the server immediately',
+                'cve': 'CVE-2014-3566'
             },
             'TLSv1.0': {
                 'name': 'TLSv1.0',
                 'protocol': 'TLSv1.0',
                 'severity': 'High',
-                'description': 'TLSv1.0 is outdated and potentially insecure',
-                'recommendation': 'Disable TLSv1.0 on the server'
+                'description': 'TLSv1.0 is outdated and vulnerable to BEAST attack and other weaknesses',
+                'recommendation': 'Disable TLSv1.0 on the server',
+                'cve': 'CVE-2011-3389'
             },
             'TLSv1.1': {
                 'name': 'TLSv1.1',
                 'protocol': 'TLSv1.1',
                 'severity': 'Medium',
-                'description': 'TLSv1.1 is outdated and should be upgraded',
-                'recommendation': 'Upgrade to TLSv1.2 or TLSv1.3'
+                'description': 'TLSv1.1 is outdated and should be upgraded, lacks modern cryptographic algorithms',
+                'recommendation': 'Upgrade to TLSv1.2 or TLSv1.3',
+                'cve': ''
             }
         }
         
@@ -4088,38 +4259,83 @@ class SSLTLSScanner:
             {
                 'name': 'NULL',
                 'severity': 'Critical',
-                'description': 'NULL ciphers provide no encryption',
-                'keywords': ['NULL']
+                'description': 'NULL ciphers provide no encryption and allow plaintext communication',
+                'keywords': ['NULL'],
+                'cve': 'CVE-2015-0204'
             },
             {
                 'name': 'RC4',
                 'severity': 'Critical',
-                'description': 'RC4 encryption is broken and insecure',
-                'keywords': ['RC4']
+                'description': 'RC4 encryption is cryptographically broken and can be exploited to reveal encrypted data',
+                'keywords': ['RC4', 'ARCFOUR'],
+                'cve': 'CVE-2015-2808'
             },
             {
                 'name': 'DES',
                 'severity': 'Critical',
-                'description': 'DES and Triple DES (3DES) are weak and outdated',
-                'keywords': ['DES', '3DES']
+                'description': 'DES and Triple DES (3DES) are weak ciphers vulnerable to Sweet32 attack',
+                'keywords': ['DES', '3DES', 'DES-CBC3'],
+                'cve': 'CVE-2016-2183'
             },
             {
                 'name': 'MD5',
                 'severity': 'High',
-                'description': 'MD5 hashing is cryptographically broken',
-                'keywords': ['MD5']
+                'description': 'MD5 hashing is cryptographically broken and vulnerable to collision attacks',
+                'keywords': ['MD5', 'MD-5'],
+                'cve': 'CVE-2014-8275'
             },
             {
                 'name': 'Export',
                 'severity': 'Critical',
-                'description': 'Export-grade cipher suites are deliberately weakened',
-                'keywords': ['EXPORT', 'EXP']
+                'description': 'Export-grade cipher suites are deliberately weakened and vulnerable to FREAK and Logjam attacks',
+                'keywords': ['EXPORT', 'EXP', 'DHE_EXPORT', 'RSA_EXPORT'],
+                'cve': 'CVE-2015-0204'
             },
             {
                 'name': 'Anonymous',
                 'severity': 'Critical',
-                'description': 'Anonymous cipher suites provide no authentication',
-                'keywords': ['ADH', 'AECDH', 'ANON']
+                'description': 'Anonymous cipher suites provide no authentication and are vulnerable to MITM attacks',
+                'keywords': ['ADH', 'AECDH', 'ANON', 'DH_anon'],
+                'cve': ''
+            },
+            {
+                'name': 'IDEA',
+                'severity': 'High',
+                'description': 'IDEA cipher is outdated and potentially vulnerable',
+                'keywords': ['IDEA'],
+                'cve': ''
+            },
+            {
+                'name': 'SEED',
+                'severity': 'Medium',
+                'description': 'SEED cipher is not widely reviewed and potentially vulnerable',
+                'keywords': ['SEED'],
+                'cve': ''
+            },
+            {
+                'name': 'CAMELLIA-128',
+                'severity': 'Low',
+                'description': 'CAMELLIA-128 provides inadequate security margin by modern standards',
+                'keywords': ['CAMELLIA128', 'CAMELLIA-128'],
+                'cve': ''
+            }
+        ]
+        
+        # Weak key exchanges
+        self.weak_key_exchanges = [
+            {
+                'name': 'DHE-512',
+                'severity': 'Critical',
+                'description': 'DH key exchange with 512 bits is trivially breakable',
+                'keywords': ['DHE_512', 'DH-512'],
+                'cve': 'CVE-2015-4000'
+            },
+            {
+                'name': 'DHE-1024',
+                'severity': 'High',
+                'description': 'DH key exchange with 1024 bits is potentially vulnerable to nation-state attacks',
+                'keywords': ['DHE_1024', 'DH-1024', 'DHE-RSA-1024'],
+                'cve': 'CVE-2015-4000'
             }
         ]
     

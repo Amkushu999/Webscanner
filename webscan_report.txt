@@ -1,24 +1,22 @@
 ================================================================================
 WebScan v1.2.0 - Advanced Vulnerability Report
 Developed by AMKUSH
-Generated: 2025-04-07 22:09:08
+Generated: 2025-04-07 22:27:38
 ================================================================================
 
 SCAN INFORMATION
 --------------------------------------------------------------------------------
 Target URL: https://example.com
-Scan Types: sqli, xss, port, dir, files, headers, ssl, info
-Start Time: 2025-04-07 22:05:47
-Duration: 200.92 seconds
-Vulnerabilities Found: 16
+Scan Types: ssl
+Start Time: 2025-04-07 22:27:37
+Duration: 0.82 seconds
+Vulnerabilities Found: 4
 
 VULNERABILITY SUMMARY
 --------------------------------------------------------------------------------
-Critical: 1
+Critical: 2
 High: 1
-Medium: 6
-Low: 6
-Info: 2
+Medium: 1
 
 DETAILED FINDINGS
 ================================================================================
@@ -27,121 +25,32 @@ Insecure Protocol
 -----------------
 Severity: Critical
 URL: https://example.com
-Details: SSLv3 is vulnerable to POODLE attack
+Details: SSLv2 is fundamentally broken and deprecated for over 20 years - DROWN Attack vulnerable
+Protocol: SSLv2
+Recommendation: Disable SSLv2 on the server immediately
+
+----------------------------------------
+Severity: Critical
+URL: https://example.com
+Details: SSLv3 is vulnerable to POODLE attack which allows decryption of secure communications
 Protocol: SSLv3
-Recommendation: Disable SSLv3 on the server
+Recommendation: Disable SSLv3 on the server immediately
 
 ----------------------------------------
 Severity: High
 URL: https://example.com
-Details: TLSv1.0 is outdated and potentially insecure
+Details: TLSv1.0 is outdated and vulnerable to BEAST attack and other weaknesses
 Protocol: TLSv1.0
 Recommendation: Disable TLSv1.0 on the server
 
 ----------------------------------------
 Severity: Medium
 URL: https://example.com
-Details: TLSv1.1 is outdated and should be upgraded
+Details: TLSv1.1 is outdated and should be upgraded, lacks modern cryptographic algorithms
 Protocol: TLSv1.1
 Recommendation: Upgrade to TLSv1.2 or TLSv1.3
 
 
-Missing Security Header
------------------------
-Severity: Medium
-URL: https://example.com
-Details: HTTP Strict Transport Security (HSTS) forces secure connections to the server
-Header: Strict-Transport-Security
-Recommendation: Add "Strict-Transport-Security: max-age=31536000; includeSubDomains" header
-
-----------------------------------------
-Severity: Medium
-URL: https://example.com
-Details: Content Security Policy prevents XSS and data injection attacks
-Header: Content-Security-Policy
-Recommendation: Implement a Content Security Policy that restricts resource loading
-
-----------------------------------------
-Severity: Medium
-URL: https://example.com
-Details: Prevents MIME-sniffing a response away from the declared content-type
-Header: X-Content-Type-Options
-Recommendation: Add "X-Content-Type-Options: nosniff" header
-
-----------------------------------------
-Severity: Medium
-URL: https://example.com
-Details: Protects website against clickjacking attacks
-Header: X-Frame-Options
-Recommendation: Add "X-Frame-Options: DENY" or "X-Frame-Options: SAMEORIGIN" header
-
-----------------------------------------
-Severity: Low
-URL: https://example.com
-Details: Enables XSS filtering in browser (deprecated in modern browsers in favor of CSP)
-Header: X-XSS-Protection
-Recommendation: Add "X-XSS-Protection: 1; mode=block" header
-
-----------------------------------------
-Severity: Low
-URL: https://example.com
-Details: Controls how much referrer information is included with requests
-Header: Referrer-Policy
-Recommendation: Add appropriate Referrer-Policy header like "strict-origin-when-cross-origin"
-
-----------------------------------------
-Severity: Low
-URL: https://example.com
-Details: Controls which browser features can be used (now renamed to Permissions-Policy)
-Header: Feature-Policy
-Recommendation: Implement Feature-Policy or Permissions-Policy to restrict browser features
-
-----------------------------------------
-Severity: Low
-URL: https://example.com
-Details: Controls which browser features and APIs can be used
-Header: Permissions-Policy
-Recommendation: Implement Permissions-Policy to restrict browser features
-
-----------------------------------------
-Severity: Info
-URL: https://example.com
-Details: HPKP pins a site to specific certificate keys (considered high risk, deprecated)
-Header: Public-Key-Pins
-Recommendation: Consider using Certificate Transparency instead of HPKP
-
-----------------------------------------
-Severity: Info
-URL: https://example.com
-Details: Clears browser data (cookies, storage, cache) for the website
-Header: Clear-Site-Data
-Recommendation: Use Clear-Site-Data header on logout pages
-
-
-Information Disclosure
-----------------------
-Severity: Medium
-URL: https://example.com
-Details: Found File Path: /html, /css, /domains/example
-Recommendation: Remove file path from the page source
-
-
-Open Port
----------
-Severity: Low
-Details: Port 80 (HTTP) is open on example.com
-Port: 80
-Service: HTTP
-Recommendation: Close unnecessary ports and implement proper firewall rules
-
-----------------------------------------
-Severity: Low
-Details: Port 443 (HTTPS) is open on example.com
-Port: 443
-Service: HTTPS
-Recommendation: Close unnecessary ports and implement proper firewall rules
-
-
 ================================================================================
-Report generated at: 2025-04-07 22:09:08
+Report generated at: 2025-04-07 22:27:38
 ================================================================================
